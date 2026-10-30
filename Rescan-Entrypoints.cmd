@@ -1,5 +1,12 @@
 @echo off
-cd /d "%~dp0"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\integrate-entrypoints.ps1" -Action Install -AppRoot "%~dp0."
+setlocal DisableDelayedExpansion
+set "ERRORLEVEL="
+if not exist "%~dp0DragonCodexBoot.exe" (
+    echo Launcher missing. Extract or build the complete program first.
+    exit /b 1
+)
+"%~dp0DragonCodexBoot.exe" --integrate-entrypoints
+set "launcherExit=%ERRORLEVEL%"
 echo.
 pause
+exit /b %launcherExit%

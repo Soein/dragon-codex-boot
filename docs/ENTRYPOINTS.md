@@ -11,6 +11,8 @@
 
 恢复与重新扫描也可使用 `DragonCodexBoot.exe --restore-entrypoints` / `--integrate-entrypoints`，不播放视频。命令行执行会等待入口脚本完成；平常播放的扫描在后台进行。
 
+两份 CMD 文件直接调用同目录启动器，再由启动器通过 Windows 系统 API 定位 Windows PowerShell；不会搜索当前目录或 `PATH` 中的同名程序。CMD 文件关闭延迟变量展开并引用完整路径，程序包目录可包含空格及 `!` 等合法字符。缺少启动器时操作失败；不要只拷贝 CMD 文件。
+
 如果要完全关闭替换，在首次运行前设置：
 
 ```json
@@ -43,6 +45,8 @@
 | Windows、回收站、链接目录、运行时/缓存目录、启动器目录 | 跳过；不修改应用包 |
 
 因此这项功能是当前账户内可恢复的快捷方式替换，不能声称所有启动路径都已接管。报告标明 `SearchScope: CurrentUserOnly`，同时保留 `RegisteredApplicationChanged: false`、`StartPinsAutomaticallyChanged: false` 和 `TaskbarCacheRefreshVerified: false`。
+
+播放后的窗口接入另有独立的身份边界：仅接受固定官方 Store 包族 `OpenAI.Codex_2p2nqsd0c76g0`，拒绝开发、松散、自签及其他来源的包。进程名称和路径配置不构成授权，详见[配置说明](CONFIGURATION.md)。快捷方式验证通过也不代表目标客户端窗口已通过包身份或交接验证。
 
 ## 迁移与卸载
 
