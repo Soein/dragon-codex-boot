@@ -15,9 +15,11 @@
 | `Volume` | 0–1 音量 |
 | `PlayerWidth` / `PlayerHeight` | 固定播放窗口的物理像素尺寸 |
 | `MatchClientToPlayer` | 是否将真实客户端客户区对齐到播放窗口 |
-| `AutoReplaceEntrypoints` | 首次运行自动替换可识别的启动快捷方式，默认 `true`；启动前设为 `false` 可关闭 |
-| `ScanAllLocalDrives` | 除桌面、开始菜单和快速启动目录外，也扫描本地固定磁盘，默认 `true`；设为 `false` 仅扫描这些常用目录 |
+| `AutoReplaceEntrypoints` | 首次运行自动替换当前账户桌面、开始菜单程序目录和快速启动目录中可识别的快捷方式，默认 `true`；启动前设为 `false` 可关闭 |
+| `ScanAllLocalDrives` | 兼容旧配置的失效字段，默认 `false`；即使旧文件设为 `true`，也不能启用全盘、公共目录或其他账户入口扫描 |
 | `ScreenFrames` | 视频中屏幕区域的矩形关键帧 |
+
+入口集成始终要求当前账户拥有的私有本地路径；管理员权限和显式扫描目录都不能扩大为跨账户写入。详细权限边界、旧公共入口迁移和恢复限制见[启动入口说明](ENTRYPOINTS.md)。关闭配置不会自动恢复已有替换。
 
 ## 找到本机客户端标识
 

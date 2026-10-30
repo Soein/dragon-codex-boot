@@ -23,9 +23,10 @@ using System.Windows.Threading;
 
 namespace DragonCodexBoot {
  public sealed class Config {
-  public Config() { AutoReplaceEntrypoints=true; ScanAllLocalDrives=true; }
+  public Config() { AutoReplaceEntrypoints=true; }
   public bool AutoReplaceEntrypoints { get; set; }
-  public bool ScanAllLocalDrives { get; set; }
+  /// <summary>Legacy JSON compatibility; full-drive scanning is always disabled.</summary>
+  public bool ScanAllLocalDrives { get { return false; } set {} }
   public string DisplayName { get; set; }
   public string Video { get; set; }
   public string AppLaunch { get; set; }

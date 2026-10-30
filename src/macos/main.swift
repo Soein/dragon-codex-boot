@@ -3,7 +3,7 @@ import AVFoundation
 import QuartzCore
 
 // Native, independent launcher. No changes to the target app, Dock or login items.
-private let targetID = "com.openai.codex"
+private let targetID = TrustedApplication.bundleIdentifier
 private let diagnosticURL = FileManager.default.temporaryDirectory
     .appendingPathComponent("local.dragoncodexboot.macos", isDirectory: true)
     .appendingPathComponent("last-run.log")
@@ -60,6 +60,8 @@ final class Launcher: NSObject, NSApplicationDelegate {
             fail("没有找到 Codex（应用标识 com.openai.codex）。请先安装 Codex 桌面客户端。")
             return
         }
+        do { try TrustedApplication.validateApplication(at: targetURL!) }
+        catch { fail(error.localizedDescription); return }
         if verification {
             Task { @MainActor in
                 do {
@@ -168,16 +170,25 @@ final class Launcher: NSObject, NSApplicationDelegate {
     }
 
     func launchTarget() {
+        guard let targetURL else { fail("没有找到官方 Codex。"); return }
+        do { try TrustedApplication.validateApplication(at: targetURL) }
+        catch { fail(error.localizedDescription); return }
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = false
         configuration.createsNewApplicationInstance = false
-        NSWorkspace.shared.openApplication(at: targetURL!, configuration: configuration) { [weak self] application, error in
+        NSWorkspace.shared.openApplication(at: targetURL, configuration: configuration) { [weak self] application, error in
             DispatchQueue.main.async {
                 guard let self = self, !self.finishing else { return }
+                if let error {
+                    self.fail("Codex 启动失败：\(error.localizedDescription)")
+                    return
+                }
                 guard let application = application else {
                     self.fail("Codex 启动失败：\(error?.localizedDescription ?? "未知错误")")
                     return
                 }
+                do { try TrustedApplication.validateProcess(application.processIdentifier) }
+                catch { self.fail(error.localizedDescription); return }
                 self.target = application
                 self.launchFinished = true
                 report("TARGET launched: \(application.bundleIdentifier ?? "unknown")")
@@ -220,6 +231,8 @@ final class Launcher: NSObject, NSApplicationDelegate {
             if target?.isTerminated == true { fail("Codex 已退出，请重新打开启动器。") }
             return
         }
+        do { try TrustedApplication.validateProcess(application.processIdentifier) }
+        catch { fail(error.localizedDescription); return }
         finishing = true
         watchdog?.invalidate()
         let activated = application.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
@@ -232,6 +245,8 @@ final class Launcher: NSObject, NSApplicationDelegate {
             self.player?.pause()
             self.window?.orderOut(nil)
             // Repeat after the overlay closes to give the real app keyboard focus.
+            do { try TrustedApplication.validateProcess(application.processIdentifier) }
+            catch { self.fail(error.localizedDescription); return }
             _ = application.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
             report("FINISHED")
             NSApp.terminate(nil)

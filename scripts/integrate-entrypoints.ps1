@@ -8,35 +8,44 @@ param(
     [ValidateRange(1,1800)][int]$ScanBudgetSeconds=300
 )
 $ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'entrypoint-safety.ps1')
 if (!$AppRoot) {
     $parent=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
     if (Test-Path -LiteralPath (Join-Path $parent 'DragonCodexBoot.exe')) { $AppRoot=$parent }
     else { $AppRoot=Join-Path $parent 'build/DragonCodexBoot' }
 }
-$AppRoot=[IO.Path]::GetFullPath($AppRoot)
-if ($AppRoot -ne [IO.Path]::GetPathRoot($AppRoot)) { $AppRoot=$AppRoot.TrimEnd('\','/') }
+$AppRoot=Get-EntrypointPath $AppRoot
+Assert-EntrypointPath $AppRoot -Directory
+if ($SearchRoots) { foreach ($path in $SearchRoots) { Assert-EntrypointPath $path -Directory } }
 $exePath=Join-Path $AppRoot 'DragonCodexBoot.exe'
 $stateRoot=Join-Path $AppRoot '.integration'
 $statePath=Join-Path $stateRoot 'entrypoints-state.json'
 $reportPath=Join-Path $stateRoot 'report.json'
+foreach ($path in @($stateRoot,$statePath,$reportPath,(Join-Path $stateRoot 'backups'))) { Assert-EntrypointPath $path -AllowMissing }
 $mutex=New-Object Threading.Mutex($false,'Local\DragonCodexBoot.EntryIntegration')
 $locked=$false
 $report=[ordered]@{
     Action=$Action;Started=(Get-Date).ToString('o');Finished=$null;Status='Running'
     Replaced=0;Created=0;Restored=0;AlreadyOwned=0;LinksInspected=0;FoldersInspected=0
-    SkippedFolders=0;ScanTimedOut=$false;SearchRoots=@();Errors=@();Preserved=@()
+    SkippedFolders=0;ScanTimedOut=$false;SearchRoots=@();SearchScope='CurrentUserOnly';IgnoredLegacyScanAllLocalDrives=$false;Errors=@();Preserved=@()
     RegisteredApplicationChanged=$false;StartPinsAutomaticallyChanged=$false
     TaskbarCacheRefreshVerified=$false
     Limits=@('Only .lnk launch shortcuts for the configured installed client are retargeted.',
         'MSIX AppsFolder/Start app registrations, existing Start pins, direct EXE calls, protocols and web URLs are not intercepted.',
-        'Shared shortcuts require write permission. Taskbar pins may need unpinning and repinning.',
+        'Shared, other-user, network and reparse paths are unsupported, including during restoration.',
+        'Only current-account-owned paths without other non-administrator writers are supported. Taskbar pins may need unpinning and repinning.',
         'Inaccessible, reparse, system/runtime/cache folders and the launcher folder are skipped; scanning has a time budget.')
 }
 function Hash([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash }
 function Write-Json([string]$Path,$Value) {
+    Assert-EntrypointPath $Path -AllowMissing
     $temp=$Path+'.'+[Guid]::NewGuid().ToString('N')+'.tmp'
-    $Value | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $temp -Encoding UTF8
-    Move-Item -LiteralPath $temp -Destination $Path -Force
+    try {
+        $Value | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $temp -Encoding UTF8
+        Set-EntrypointGeneratedOwner $temp
+        Assert-EntrypointPath $Path -AllowMissing
+        Move-Item -LiteralPath $temp -Destination $Path -Force
+    } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp } }
 }
 function Save-State { Write-Json $statePath $script:state }
 function Path-Equals([string]$a,[string]$b) { [string]::Equals($a,$b,[StringComparison]::OrdinalIgnoreCase) }
@@ -66,7 +75,7 @@ function Find-Record([string]$Path) {
     @($script:state.Entries | Where-Object { (Path-Equals $_.Path $Path) -and !$_.Restored }) | Select-Object -Last 1
 }
 function Replace-Link([string]$Path,[bool]$Create=$false) {
-    if ((Test-Path -LiteralPath $Path) -and (([IO.File]::GetAttributes($Path) -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { return }
+    Assert-EntrypointLink $Path -AllowMissing
     $record=Find-Record $Path
     $exists=Test-Path -LiteralPath $Path -PathType Leaf
     if ($record) {
@@ -90,6 +99,7 @@ function Replace-Link([string]$Path,[bool]$Create=$false) {
             if ($exists) {
                 $original=Join-Path $stateRoot ('backups/'+[Guid]::NewGuid().ToString('N')+'.lnk')
                 Copy-Item -LiteralPath $Path -Destination $original
+                Set-EntrypointGeneratedOwner $original
                 if ((Hash $original) -ne $beforeHash) { throw 'Backup checksum mismatch.' }
             }
             $record=[pscustomobject]@{Path=$Path;OriginalExists=$exists;OriginalBackup=$original;OriginalSHA256=$beforeHash;InstalledSHA256=$null;Restored=$false}
@@ -102,6 +112,7 @@ function Replace-Link([string]$Path,[bool]$Create=$false) {
         $new.IconLocation=if ($old -and ![string]::IsNullOrWhiteSpace($old.IconLocation)) { $old.IconLocation } else { $script:defaultIcon }
         if ($old) { $new.Hotkey=$old.Hotkey;$new.WindowStyle=$old.WindowStyle }
         $new.Save()
+        Set-EntrypointGeneratedOwner $temp
         if (!(Link-Is-Launcher $temp) -or ![string]::IsNullOrWhiteSpace((Get-AppID $temp))) { throw 'New shortcut metadata verification failed.' }
         # Check the original again immediately before replacing it; preserve concurrent edits.
         if ($exists -and (!(Test-Path -LiteralPath $Path) -or (Hash $Path) -ne $beforeHash)) { throw 'Shortcut changed during installation; preserved.' }
@@ -110,6 +121,7 @@ function Replace-Link([string]$Path,[bool]$Create=$false) {
         $record.InstalledSHA256=$newHash
         if (!(Find-Record $Path)) { $script:state.Entries+=@($record) }
         Save-State
+        Assert-EntrypointLink $Path -AllowMissing
         Move-Item -LiteralPath $temp -Destination $Path -Force
         if ((Hash $Path) -ne $newHash -or !(Link-Is-Launcher $Path)) { throw 'Installed shortcut verification failed.' }
         if ($exists) { $script:report.Replaced++ } else { $script:report.Created++ }
@@ -127,21 +139,34 @@ function Replace-Link([string]$Path,[bool]$Create=$false) {
 function Restore-Links {
     foreach ($entry in @($script:state.Entries)) {
         if ($entry.Restored) { continue }
+        $temp=$null
         try {
+            Assert-EntrypointLink $entry.Path -AllowMissing
             $exists=Test-Path -LiteralPath $entry.Path -PathType Leaf
             if ($exists -and $entry.OriginalExists -and (Hash $entry.Path) -eq $entry.OriginalSHA256) { $entry.Restored=$true;Save-State;continue }
             if (!$exists -or (Hash $entry.Path) -ne $entry.InstalledSHA256) {
                 $script:report.Preserved+=@{Path=$entry.Path;Reason='Shortcut was removed or modified; restore did not overwrite it.'};continue
             }
             if ($entry.OriginalExists) {
-                $backup=[IO.Path]::GetFullPath($entry.OriginalBackup)
-                $backupRoot=[IO.Path]::GetFullPath((Join-Path $stateRoot 'backups'))+[IO.Path]::DirectorySeparatorChar
-                if (!$backup.StartsWith($backupRoot,[StringComparison]::OrdinalIgnoreCase) -or (Hash $backup) -ne $entry.OriginalSHA256) { throw 'Backup verification failed.' }
-                Copy-Item -LiteralPath $backup -Destination $entry.Path -Force
+                $backup=Get-EntrypointPath $entry.OriginalBackup
+                Assert-EntrypointBackup $backup (Join-Path $stateRoot 'backups')
+                if ((Hash $backup) -ne $entry.OriginalSHA256) { throw 'Backup verification failed.' }
+                $temp=Join-Path ([IO.Path]::GetDirectoryName($entry.Path)) ('DragonCodexBoot-'+[Guid]::NewGuid().ToString('N')+'.lnk')
+                Copy-Item -LiteralPath $backup -Destination $temp
+                Set-EntrypointGeneratedOwner $temp
+                if ((Hash $temp) -ne $entry.OriginalSHA256) { throw 'Restore copy checksum mismatch.' }
+                Assert-EntrypointLink $entry.Path
+                if ((Hash $entry.Path) -ne $entry.InstalledSHA256) { throw 'Shortcut changed during restoration; preserved.' }
+                Move-Item -LiteralPath $temp -Destination $entry.Path -Force
                 if ((Hash $entry.Path) -ne $entry.OriginalSHA256) { throw 'Restored checksum mismatch.' }
-            } else { Remove-Item -LiteralPath $entry.Path }
+            } else {
+                Assert-EntrypointLink $entry.Path
+                if ((Hash $entry.Path) -ne $entry.InstalledSHA256) { throw 'Shortcut changed during restoration; preserved.' }
+                Remove-Item -LiteralPath $entry.Path
+            }
             $entry.Restored=$true;$script:report.Restored++;Save-State
         } catch { $script:report.Errors+=@{Path=$entry.Path;Reason=$_.Exception.Message} }
+        finally { if ($temp -and (Test-Path -LiteralPath $temp)) { Remove-Item -LiteralPath $temp -ErrorAction SilentlyContinue } }
     }
     $script:state.AutoAttempted=$true;$script:state.Restored=$true;Save-State
 }
@@ -149,7 +174,8 @@ try {
     try { $locked=$mutex.WaitOne($(if ($Action -eq 'Auto') { 0 } else { 60000 })) } catch [Threading.AbandonedMutexException] { $locked=$true }
     if (!$locked -and $Action -eq 'Auto') { return }
     if (!$locked) { throw 'Another entrypoint operation is still running. Try again after it finishes.' }
-    New-Item -ItemType Directory -Path $stateRoot,(Join-Path $stateRoot 'backups') -Force | Out-Null
+    New-EntrypointDirectory $stateRoot
+    New-EntrypointDirectory (Join-Path $stateRoot 'backups')
     $script:state=if (Test-Path -LiteralPath $statePath) { Get-Content -LiteralPath $statePath -Encoding UTF8 -Raw | ConvertFrom-Json } else {
         [pscustomobject]@{Schema=1;AutoAttempted=$false;Restored=$false;Entries=@()}
     }
@@ -160,13 +186,19 @@ try {
     if ($Action -eq 'Restore') { Restore-Links;$report.Status=if ($report.Errors.Count -or $report.Preserved.Count) { 'RestoredWithPreservedChanges' } else { 'Restored' };return }
     if ($Action -eq 'Verify') {
         foreach ($entry in @($state.Entries | Where-Object { !$_.Restored })) {
-            if ((Test-Path -LiteralPath $entry.Path) -and (Hash $entry.Path) -eq $entry.InstalledSHA256 -and (Link-Is-Launcher $entry.Path)) { $report.AlreadyOwned++ }
-            else { $report.Preserved+=@{Path=$entry.Path;Reason='Shortcut no longer matches the installed version.'} }
+            try {
+                Assert-EntrypointLink $entry.Path -AllowMissing
+                if ((Test-Path -LiteralPath $entry.Path) -and (Hash $entry.Path) -eq $entry.InstalledSHA256 -and (Link-Is-Launcher $entry.Path)) { $report.AlreadyOwned++ }
+                else { $report.Preserved+=@{Path=$entry.Path;Reason='Shortcut no longer matches the installed version.'} }
+            } catch { $report.Errors+=@{Path=$entry.Path;Reason=$_.Exception.Message} }
         }
-        $report.Status='Verified';return
+        $report.Status=if ($report.Errors.Count) { 'VerifiedWithRejectedPaths' } else { 'Verified' };return
     }
     if (!(Test-Path -LiteralPath $exePath -PathType Leaf)) { throw 'Extract or build the complete launcher first.' }
+    Assert-EntrypointPath $exePath
+    Assert-EntrypointPath (Join-Path $AppRoot 'launcher.json')
     $cfg=Get-Content -LiteralPath (Join-Path $AppRoot 'launcher.json') -Encoding UTF8 -Raw | ConvertFrom-Json
+    $report.IgnoredLegacyScanAllLocalDrives=($cfg.ScanAllLocalDrives -eq $true)
     if ($Action -eq 'Auto' -and $cfg.AutoReplaceEntrypoints -eq $false) { $report.Status='Disabled';return }
     if ($cfg.AppLaunch -notmatch '^shell:AppsFolder\\([A-Za-z0-9_.-]+![A-Za-z0-9_.-]+)$') { throw 'Configured AppLaunch must be an AppsFolder application ID.' }
     $script:appID=$Matches[1]
@@ -189,16 +221,12 @@ try {
     foreach ($path in $officialTargets) { if (Test-Path -LiteralPath $path) { $script:defaultIcon=$path+',0';break } }
     $roots=New-Object 'Collections.Generic.List[string]'
     if ($SearchRoots) {
-        foreach ($path in $SearchRoots) { $roots.Add([IO.Path]::GetFullPath($path)) }
+        foreach ($path in $SearchRoots) { $roots.Add((Get-EntrypointPath $path)) }
     } else {
-        foreach ($folder in @('DesktopDirectory','CommonDesktopDirectory','Programs','CommonPrograms')) {
-            $path=[Environment]::GetFolderPath($folder);if ($path) { $roots.Add($path) }
-        }
-        $roots.Add((Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Microsoft/Internet Explorer/Quick Launch'))
-        if ($cfg.ScanAllLocalDrives -ne $false) {
-            foreach ($drive in [IO.DriveInfo]::GetDrives()) {
-                if ($drive.IsReady -and $drive.DriveType -eq [IO.DriveType]::Fixed) { $roots.Add($drive.RootDirectory.FullName) }
-            }
+        foreach ($path in @(Get-EntrypointDefaultRoots)) {
+            if (!(Test-Path -LiteralPath $path -PathType Container)) { continue }
+            try { Assert-EntrypointPath $path -Directory;$roots.Add((Get-EntrypointPath $path)) }
+            catch { $report.Errors+=@{Path=$path;Reason=$_.Exception.Message} }
         }
     }
     $report.SearchRoots=@($roots)
@@ -217,7 +245,7 @@ try {
         if (!$seen.Add($dir)) { continue }
         if ((Path-Equals $dir $AppRoot) -or (Path-Equals $dir $windows) -or $skipNames -icontains [IO.Path]::GetFileName($dir)) { $report.SkippedFolders++;continue }
         try {
-            if (([IO.File]::GetAttributes($dir) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $report.SkippedFolders++;continue }
+            Assert-EntrypointPath $dir -Directory
             $report.FoldersInspected++
             foreach ($file in [IO.Directory]::GetFiles($dir,'*.lnk',[IO.SearchOption]::TopDirectoryOnly)) {
                 if ($seenLinks.Add($file)) {
@@ -226,13 +254,16 @@ try {
                 }
             }
             foreach ($child in [IO.Directory]::GetDirectories($dir)) { $queue.Enqueue($child) }
-        } catch { $report.SkippedFolders++ }
+        } catch { $report.SkippedFolders++;$report.Errors+=@{Path=$dir;Reason=$_.Exception.Message} }
     }
     if (!$SearchRoots -and !$NoCreateDefaultLinks) {
         $name=($displayName -replace '[<>:"/\\|?*]','_')+'.lnk'
         foreach ($folder in @('DesktopDirectory','Programs')) {
             $dir=[Environment]::GetFolderPath($folder)
-            if ($dir -and (Test-Path -LiteralPath $dir -PathType Container)) { Replace-Link (Join-Path $dir $name) $true }
+            if ($dir -and (Test-Path -LiteralPath $dir -PathType Container)) {
+                try { Replace-Link (Join-Path $dir $name) $true }
+                catch { $report.Errors+=@{Path=$dir;Reason=$_.Exception.Message} }
+            }
         }
     }
     $report.Status=if ($report.Errors.Count -or $report.ScanTimedOut -or $report.SkippedFolders) { 'CompletedWithLimits' } else { 'Completed' }

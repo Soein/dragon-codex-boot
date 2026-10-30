@@ -32,7 +32,7 @@ public struct LauncherConfiguration: Codable, Equatable {
     public init(
         displayName: String = "Dragon Codex Boot",
         video: String = "media/startup.mp4",
-        appBundleIdentifier: String = "com.openai.codex",
+        appBundleIdentifier: String = TrustedApplication.bundleIdentifier,
         appPath: String = "",
         holdAt: Double = 11.3,
         transitionStart: Double = 12.7,

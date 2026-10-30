@@ -1,6 +1,6 @@
 {
   "AutoReplaceEntrypoints": true,
-  "ScanAllLocalDrives": true,
+  "ScanAllLocalDrives": false,
   "Video": "media/startup.mp4",
   "AppLaunch": "shell:AppsFolder\\OpenAI.Codex_2p2nqsd0c76g0!App",
   "ProcessPathContains": "OpenAI.Codex_",

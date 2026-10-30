@@ -4,6 +4,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build_root="$repo_root/build/macos"
 app_bundle="$repo_root/build/DragonCodexBoot.app"
+source "$repo_root/scripts/macos-signing-common.sh"
+macos_signing_options "$@"
 
 if [[ "$(uname -s)" != Darwin ]]; then
   printf 'This build requires macOS and Xcode Command Line Tools.\n' >&2
@@ -20,7 +22,9 @@ swiftc \
   -framework AppKit \
   -framework AVKit \
   -framework CoreGraphics \
+  -framework Security \
   "$repo_root/macos/Sources/DragonCodexBootCore/LauncherConfiguration.swift" \
+  "$repo_root/macos/Sources/DragonCodexBootCore/TrustedApplication.swift" \
   "$repo_root/macos/Sources/DragonCodexBootMac/main.swift" \
   -o "$build_root/DragonCodexBootMac"
 
@@ -56,5 +60,5 @@ cat > "$app_bundle/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-codesign --force --deep --sign - "$app_bundle"
-printf 'Built: %s\n' "$app_bundle"
+macos_sign_app "$app_bundle"
+printf 'Built (%s): %s\n' "$signing_mode" "$app_bundle"

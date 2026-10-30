@@ -17,6 +17,14 @@ jobs:
           persist-credentials: false
       - name: Run Swift package tests
         run: swift test --package-path macos
+      - name: Reject untrusted applications and running processes
+        run: bash tests/macos-security/run.sh
+      - name: Verify isolated installation and removal boundaries
+        run: bash scripts/test-macos-install.sh
+      - name: Verify signature requirements with real signed code
+        run: bash scripts/test-macos-signature-requirement.sh
+      - name: Verify release failures without contacting Apple
+        run: bash scripts/test-macos-release.sh
       - name: Build and verify macOS app bundle
         run: ./scripts/test-macos.sh
       - name: Build and verify standalone Apple Silicon app and package

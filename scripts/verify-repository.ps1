@@ -35,8 +35,8 @@ try {
     $reader=New-Object IO.StreamReader($cfgEntry.Open())
     try { $packedConfig=$reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
     if ($packedConfig.Video -ne 'media/startup.mp4') { throw 'Private config packaged.' }
-    if ($packedConfig.AutoReplaceEntrypoints -ne $true -or $packedConfig.ScanAllLocalDrives -ne $true) { throw 'First-run integration defaults missing.' }
-    foreach ($name in @('scripts/integrate-entrypoints.ps1','Restore-Original-Entrypoints.cmd','Rescan-Entrypoints.cmd','docs/ENTRYPOINTS.md')) {
+    if ($packedConfig.AutoReplaceEntrypoints -ne $true -or $packedConfig.ScanAllLocalDrives -ne $false) { throw 'Safe first-run integration defaults missing.' }
+    foreach ($name in @('scripts/integrate-entrypoints.ps1','scripts/entrypoint-safety.ps1','Restore-Original-Entrypoints.cmd','Rescan-Entrypoints.cmd','docs/ENTRYPOINTS.md')) {
         if (!$archive.GetEntry($name)) { throw ('Entrypoint feature file missing: '+$name) }
     }
     $exeEntry=$archive.GetEntry('DragonCodexBoot.exe')

@@ -6,7 +6,7 @@ macOS 版使用 AppKit 与 AVFoundation 播放仓库中已有的龙娘动画和�
 
 - Apple Silicon Mac，macOS 13 或更新版本。
 - 构建需要 Xcode 或 Xcode Command Line Tools；运行不需要额外运行时。
-- 使用启动器需要已安装应用标识为 `com.openai.codex` 的客户端。按标识查找，不依赖应用显示名或固定安装路径。
+- 使用启动器需要已安装应用标识为 `com.openai.codex`、由 OpenAI Team ID `2DC432GLL2` 签署的官方客户端。启动前验证 Apple Developer ID 签名及身份，不依赖应用显示名或固定安装路径。
 
 在仓库根目录运行：
 
@@ -22,7 +22,17 @@ macOS 版使用 AppKit 与 AVFoundation 播放仓库中已有的龙娘动画和�
 ./scripts/package-macos-standalone.sh
 ```
 
-输出为 `dist/DragonCodexBoot-版本-macos-arm64-with-video.zip` 及对应 `.sha256`。包中保留原仓库许可和媒体说明。构建使用本地 ad-hoc 签名，未作 Developer ID 签名或 Apple 公证；在其他电脑上分发仍可能需要系统的正常首次打开确认。本脚本不修改 Gatekeeper 设置。
+输出为 `dist/DragonCodexBoot-版本-macos-arm64-with-video.zip` 及对应 `.sha256`。包中保留原仓库许可和媒体说明。默认 `--mode local` 使用本地 ad hoc 签名，未作 Developer ID 签名或 Apple 公证，不能作为正式分发验证；本脚本不修改 Gatekeeper 设置。
+
+正式发布时，显式提供钥匙串中已有的 Developer ID Application 签名身份和 `notarytool` 凭据配置：
+
+```sh
+./scripts/package-macos-standalone.sh --mode release \
+  --identity 'Developer ID Application: YOUR NAME (TEAMID1234)' \
+  --notary-profile YOUR_EXISTING_PROFILE
+```
+
+`package-macos.sh --variant standalone` 是等价入口。正式模式使用 Hardened Runtime、安全时间戳，等待 Apple 公证通过并装订、验证票据，最后重新打包为 `dist/DragonCodexBoot-版本-macos-arm64-with-video-notarized.zip` 并计算 SHA-256。任一步失败都会停止，绝不回退到 ad hoc。该命令会上传产物到 Apple；离线测试不上传，也不证明已获得公证。详细前提与验收见 [安全与发布](MACOS-SECURITY.md)。
 
 ## 使用与行为
 

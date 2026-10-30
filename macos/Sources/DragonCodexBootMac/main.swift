@@ -33,7 +33,7 @@ private enum LauncherError: LocalizedError {
         case .missingVideo(let url):
             return "找不到启动视频：\n\(url.path)\n\n请把 MP4 放到该位置，或修改 launcher.json 中的 Video。"
         case .missingApp(let detail):
-            return "找不到 Codex 桌面 App。\n\(detail)\n\n请在 launcher.json 中填写正确的 AppBundleIdentifier 或 AppPath。"
+            return "找不到 Codex 桌面 App。\n\(detail)\n\n请安装官方 Codex，或在 launcher.json 中填写其 AppPath。"
         }
     }
 }
@@ -169,6 +169,9 @@ private final class BootController: NSObject, NSWindowDelegate {
         let resolved = try Self.resolveApplication(for: runtime.configuration)
         appURL = resolved.url
         targetBundleIdentifier = resolved.bundleIdentifier
+        if let targetApplication {
+            try TrustedApplication.validateProcess(targetApplication.processIdentifier)
+        }
         self.targetApplication = targetApplication
         self.watchMode = watchMode
         self.onFinish = onFinish
@@ -178,10 +181,13 @@ private final class BootController: NSObject, NSWindowDelegate {
         }
     }
 
-    func start(matching targetFrame: CGRect? = nil) {
+    func start(matching targetFrame: CGRect? = nil) throws {
         let app = NSApplication.shared
         app.setActivationPolicy(watchMode ? .accessory : .regular)
-        if !watchMode { targetApplication = runningTargetApplication() }
+        if !watchMode { targetApplication = try runningTargetApplication() }
+        if let targetApplication {
+            try TrustedApplication.validateProcess(targetApplication.processIdentifier)
+        }
 
         let screen = NSScreen.main ?? NSScreen.screens.first
         let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
@@ -266,10 +272,12 @@ private final class BootController: NSObject, NSWindowDelegate {
         activateLauncher()
         installEscapeMonitor()
         if let targetApplication {
-            revealTargetBehindOverlay(targetApplication)
+            do { try revealTargetBehindOverlay(targetApplication) }
+            catch { stopForFailure(error); return }
         } else {
             beginOpeningTarget()
         }
+        guard !handedOff else { return }
         beginPlayback(in: videoView)
         startedAt = Date()
         let playbackTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
@@ -304,25 +312,33 @@ private final class BootController: NSObject, NSWindowDelegate {
 
     private func beginOpeningTarget() {
         if let running = targetApplication, !running.isTerminated {
-            revealTargetBehindOverlay(running)
+            do { try revealTargetBehindOverlay(running) }
+            catch { stopForFailure(error) }
             return
         }
+        do { try TrustedApplication.validateApplication(at: appURL) }
+        catch { stopForFailure(error); return }
         let openConfiguration = NSWorkspace.OpenConfiguration()
-        openConfiguration.activates = true
+        openConfiguration.activates = false
         NSWorkspace.shared.openApplication(at: appURL, configuration: openConfiguration) { [weak self] app, error in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, !self.handedOff else { return }
                 if let error {
-                    self.showPlaybackFailure(error)
+                    self.stopForFailure(error)
                     return
                 }
-                self.targetApplication = app
-                if let app { self.revealTargetBehindOverlay(app) }
+                guard let app else {
+                    self.stopForFailure(LauncherError.missingApp("启动操作没有返回目标进程。"))
+                    return
+                }
+                do { try self.revealTargetBehindOverlay(app) }
+                catch { self.stopForFailure(error) }
             }
         }
     }
 
-    private func revealTargetBehindOverlay(_ app: NSRunningApplication) {
+    private func revealTargetBehindOverlay(_ app: NSRunningApplication) throws {
+        try TrustedApplication.validateProcess(app.processIdentifier)
         targetApplication = app
         app.unhide()
         _ = app.activate(options: [.activateAllWindows])
@@ -331,15 +347,19 @@ private final class BootController: NSObject, NSWindowDelegate {
         activateLauncher()
     }
 
-    private func runningTargetApplication() -> NSRunningApplication? {
-        NSWorkspace.shared.runningApplications.first {
+    private func runningTargetApplication() throws -> NSRunningApplication? {
+        let application = NSWorkspace.shared.runningApplications.first {
             $0.bundleIdentifier == targetBundleIdentifier && !$0.isTerminated
         }
+        if let application {
+            try TrustedApplication.validateProcess(application.processIdentifier)
+        }
+        return application
     }
 
-    private func targetIsReady() -> Bool {
+    private func targetIsReady() throws -> Bool {
         guard let app = targetApplication, !app.isTerminated, app.isFinishedLaunching else {
-            targetApplication = runningTargetApplication()
+            targetApplication = try runningTargetApplication()
             return targetApplication?.isFinishedLaunching == true
         }
         return true
@@ -358,7 +378,9 @@ private final class BootController: NSObject, NSWindowDelegate {
 
         let time = player.currentTime().seconds
         guard time.isFinite else { return }
-        let ready = targetIsReady()
+        let ready: Bool
+        do { ready = try targetIsReady() }
+        catch { stopForFailure(error); return }
         if !ready, !waitingAtHold, time >= configuration.holdAt {
             elapsedBeforeWait = time
             waitingAtHold = true
@@ -406,8 +428,7 @@ private final class BootController: NSObject, NSWindowDelegate {
         handOff()
     }
 
-    private func handOff() {
-        guard !handedOff else { return }
+    private func closeOverlay() {
         handedOff = true
         timer?.invalidate()
         timer = nil
@@ -422,27 +443,59 @@ private final class BootController: NSObject, NSWindowDelegate {
         window?.orderOut(nil)
         window?.close()
         window = nil
+    }
 
+    private func stopForFailure(_ error: Error) {
+        guard !handedOff else { return }
+        closeOverlay()
+        NSLog("Codex launch stopped: %@", error.localizedDescription)
         if watchMode {
+            onFinish?()
+        } else {
+            activateLauncher()
+            NSAlert(error: error).runModal()
+            NSApplication.shared.terminate(nil)
+        }
+    }
+
+    private func handOff() {
+        guard !handedOff else { return }
+        do {
             if let app = targetApplication, !app.isTerminated {
+                try TrustedApplication.validateProcess(app.processIdentifier)
+                closeOverlay()
                 app.unhide()
                 _ = app.activate(options: [.activateAllWindows])
+                if watchMode { onFinish?() }
+                else { NSApplication.shared.terminate(nil) }
+                return
             }
-            onFinish?()
-            return
-        }
-
-        if let app = targetApplication, !app.isTerminated {
-            app.unhide()
-            _ = app.activate(options: [.activateAllWindows])
-            NSApplication.shared.terminate(nil)
-        } else {
+            if watchMode {
+                closeOverlay()
+                onFinish?()
+                return
+            }
+            try TrustedApplication.validateApplication(at: appURL)
+            closeOverlay()
             let openConfiguration = NSWorkspace.OpenConfiguration()
-            openConfiguration.activates = true
-            NSWorkspace.shared.openApplication(at: appURL, configuration: openConfiguration) { _, error in
-                if let error { NSLog("Codex handoff launch failed: %@", error.localizedDescription) }
-                NSApplication.shared.terminate(nil)
+            openConfiguration.activates = false
+            NSWorkspace.shared.openApplication(at: appURL, configuration: openConfiguration) { app, error in
+                Task { @MainActor in
+                    do {
+                        if let error { throw error }
+                        guard let app else { throw LauncherError.missingApp("启动操作没有返回目标进程。") }
+                        try TrustedApplication.validateProcess(app.processIdentifier)
+                        app.unhide()
+                        _ = app.activate(options: [.activateAllWindows])
+                    } catch {
+                        NSLog("Codex handoff stopped: %@", error.localizedDescription)
+                        NSAlert(error: error).runModal()
+                    }
+                    NSApplication.shared.terminate(nil)
+                }
             }
+        } catch {
+            stopForFailure(error)
         }
     }
 
@@ -452,7 +505,7 @@ private final class BootController: NSObject, NSWindowDelegate {
 
     fileprivate static func resolveApplication(for configuration: LauncherConfiguration) throws -> (url: URL, bundleIdentifier: String) {
         let fileManager = FileManager.default
-        let bundleIdentifier = configuration.appBundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bundleIdentifier = try TrustedApplication.validateBundleIdentifier(configuration.appBundleIdentifier)
         let rawPath = configuration.appPath.trimmingCharacters(in: .whitespacesAndNewlines)
         if !rawPath.isEmpty {
             let expanded = (rawPath as NSString).expandingTildeInPath
@@ -460,15 +513,13 @@ private final class BootController: NSObject, NSWindowDelegate {
             guard fileManager.fileExists(atPath: url.path) else {
                 throw LauncherError.missingApp("AppPath 不存在：\(url.path)")
             }
-            let discoveredBundleID = Bundle(url: url)?.bundleIdentifier ?? bundleIdentifier
-            guard !discoveredBundleID.isEmpty else {
-                throw LauncherError.missingApp("无法从 AppPath 读取 Bundle Identifier。")
-            }
-            return (url, discoveredBundleID)
+            try TrustedApplication.validateApplication(at: url)
+            return (url, bundleIdentifier)
         }
 
         if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier),
            fileManager.fileExists(atPath: url.path) {
+            try TrustedApplication.validateApplication(at: url)
             return (url, bundleIdentifier)
         }
         throw LauncherError.missingApp("未通过 Bundle Identifier 找到应用：\(bundleIdentifier)")
@@ -555,6 +606,13 @@ private final class CodexLaunchMonitor {
             return
         }
 
+        do { try TrustedApplication.validateProcess(application.processIdentifier) }
+        catch {
+            stopWaitingForWindow()
+            NSLog("Ignoring untrusted Codex launch: %@", error.localizedDescription)
+            return
+        }
+
         pendingApplication = application
         pendingSince = Date()
         lastWindowFrame = nil
@@ -592,8 +650,9 @@ private final class CodexLaunchMonitor {
                     onFinish: { [weak self] in self?.activeController = nil }
                 )
                 activeController = controller
-                controller.start(matching: frame)
+                try controller.start(matching: frame)
             } catch {
+                activeController = nil
                 NSLog("Could not start Codex launch animation: %@", error.localizedDescription)
             }
             return
@@ -637,7 +696,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             let runtime = try RuntimeConfiguration.load()
             controller = try BootController(runtime: runtime)
-            controller?.start()
+            try controller?.start()
         } catch {
             let alert = NSAlert(error: error)
             alert.runModal()

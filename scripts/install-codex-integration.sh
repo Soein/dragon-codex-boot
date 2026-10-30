@@ -2,28 +2,62 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$repo_root/scripts/macos-install-common.sh"
+macos_integration_paths "$@"
 source_app="$repo_root/build/DragonCodexBoot.app"
-install_root="$HOME/Applications"
-install_app="$install_root/DragonCodexBoot.app"
-expected_bundle_id="community.dragoncodexboot.macos"
-agent_label="community.dragoncodexboot.codex-watcher"
-agent_plist="$HOME/Library/LaunchAgents/$agent_label.plist"
-launch_domain="gui/$(id -u)"
 
+# Validate destinations before building or changing the running LaunchAgent.
 "$repo_root/scripts/build-macos.sh"
-
-if [[ -e "$install_app" ]]; then
-  existing_bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$install_app/Contents/Info.plist" 2>/dev/null || true)"
-  if [[ "$existing_bundle_id" != "$expected_bundle_id" ]]; then
-    printf 'Refusing to replace an unrelated app at: %s\n' "$install_app" >&2
-    exit 1
+macos_check_integration_app "$source_app"
+codesign --verify --deep --strict "$source_app"
+macos_check_integration_paths
+mkdir -p "$install_root" "$agent_directory"
+stage=
+plist_stage=
+had_app=0
+had_plist=0
+replaced=0
+completed=0
+cleanup() {
+  local status=$?
+  if [[ "$completed" == 0 && "$replaced" == 1 ]]; then
+    rm -rf "$install_app"
+    if [[ "$had_app" == 1 ]]; then mv "$stage/previous.app" "$install_app"; fi
+    if [[ "$had_plist" == 1 ]]; then
+      mv "$stage/previous.plist" "$agent_plist"
+    else
+      rm -f "$agent_plist"
+    fi
+  elif [[ "$completed" == 0 && "$had_app" == 1 && ! -e "$install_app" ]]; then
+    mv "$stage/previous.app" "$install_app"
   fi
-fi
+  if [[ -n "$stage" ]]; then rm -rf "$stage"; fi
+  if [[ -n "$plist_stage" ]]; then rm -f "$plist_stage"; fi
+  return "$status"
+}
+trap cleanup EXIT
+stage="$(mktemp -d "$install_root/.dragon-codex-XXXXXX")"
+plist_stage="$(mktemp "$agent_directory/.dragon-codex-XXXXXX")"
 
-mkdir -p "$install_root"
+ditto "$source_app" "$stage/DragonCodexBoot.app"
+macos_check_integration_app "$stage/DragonCodexBoot.app"
+codesign --verify --deep --strict "$stage/DragonCodexBoot.app"
+plutil -create xml1 "$plist_stage"
+plutil -insert Label -string "$agent_label" "$plist_stage"
+plutil -insert ProgramArguments -array "$plist_stage"
+plutil -insert ProgramArguments.0 -string "$install_app/Contents/MacOS/DragonCodexBootMac" "$plist_stage"
+plutil -insert ProgramArguments.1 -string --watch "$plist_stage"
+plutil -insert RunAtLoad -bool true "$plist_stage"
+plutil -insert LimitLoadToSessionType -string Aqua "$plist_stage"
+plutil -lint "$plist_stage" >/dev/null
+macos_check_integration_paths
+if [[ -f "$agent_plist" ]]; then cp -p "$agent_plist" "$stage/previous.plist"; had_plist=1; fi
 launchctl bootout "$launch_domain/$agent_label" >/dev/null 2>&1 || true
-ditto "$source_app" "$install_app"
-"$install_app/Contents/MacOS/DragonCodexBootMac" --install-integration
+if [[ -d "$install_app" ]]; then mv "$install_app" "$stage/previous.app"; had_app=1; fi
+mv "$stage/DragonCodexBoot.app" "$install_app"
+replaced=1
+mv -f "$plist_stage" "$agent_plist"
 launchctl bootstrap "$launch_domain" "$agent_plist"
+completed=1
 printf 'Installed app: %s\n' "$install_app"
 printf 'Quit and reopen Codex to test the launch monitor.\n'
