@@ -15,7 +15,8 @@ $securityArgs=@('/nologo','/target:exe','/platform:x64',('/out:'+(Join-Path $out
 & (Join-Path $framework 'csc.exe') @securityArgs
 if ($LASTEXITCODE -ne 0) { throw 'Windows security test harness compilation failed.' }
 $securityFixture=Join-Path $repoRoot ('.local/windows-security-'+[Guid]::NewGuid().ToString('N'))
-$otherPackage=Get-AppxPackage | Where-Object { $_.PackageFamilyName -ne 'OpenAI.Codex_2p2nqsd0c76g0' } | Select-Object -First 1
+# The interoperability positive case must use an activatable main package, matching the production HEAD filter.
+$otherPackage=Get-AppxPackage -PackageTypeFilter Main | Where-Object { $_.PackageFamilyName -ne 'OpenAI.Codex_2p2nqsd0c76g0' } | Select-Object -First 1
 & (Join-Path $outputRoot 'WindowsSecurityTests.exe') $repoRoot $securityFixture $otherPackage.PackageFullName
 if ($LASTEXITCODE -ne 0) { throw 'Windows process identity or system-tool security tests failed.' }
 Get-Content -LiteralPath (Join-Path $outputRoot 'qa/windows-security-tests.json') -Raw
