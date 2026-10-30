@@ -6,9 +6,9 @@
 | --- | --- |
 | `DisplayName` | 播放窗口的显示名 |
 | `Video` | 本地 MP4，相对路径以可执行文件目录为基准，也可写绝对路径 |
-| `AppLaunch` | 已安装客户端的 `shell:AppsFolder\包族名!应用ID` |
-| `ProcessNames` | 客户端进程名列表，不带 `.exe` |
-| `ProcessPathContains` | 可执行文件路径中必须出现的字符串，用来区分同名进程 |
+| `AppLaunch` | 受支持官方 Store 包的 `shell:AppsFolder\OpenAI.Codex_2p2nqsd0c76g0!应用ID`；不能改为其他包族 |
+| `ProcessNames` | 客户端候选进程名列表，不带 `.exe`；只作筛选，不证明身份 |
+| `ProcessPathContains` | 候选可执行文件路径中必须出现的字符串；只能收窄候选范围，不能扩大受信包或发布者范围 |
 | `HoldAt` | 客户端未就绪时暂停视频的位置，单位秒 |
 | `TransitionStart` / `TransitionEnd` | 真实界面淡入与填满窗口的起止秒数 |
 | `MaxWaitSeconds` | 等待预算；当前实现达到 `MaxWaitSeconds + 20` 秒总墙钟时间后结束 |
@@ -27,7 +27,11 @@
 Get-StartApps | Where-Object { $_.Name -match 'ChatGPT|Codex' }
 ```
 
-示例配置使用 `OpenAI.Codex_2p2nqsd0c76g0!App`。这来自项目开发机，不保证每个发行渠道都相同；用本机实际结果更新 `AppLaunch`。进程名和路径过滤也要与实际安装匹配。
+当前仅支持包族为 `OpenAI.Codex_2p2nqsd0c76g0` 的官方 Windows Store 安装。`AppLaunch` 中的应用 ID、候选进程名和路径过滤可与该安装匹配，包族与 Store 来源策略固定在程序中，不能通过配置增加受信发布者或兼容其他发行方式。
+
+启动前，程序通过 Windows 包管理 API 检查当前账户该包族的所有相关主包注册；任何空集、错误、开发注册或非 Store 来源都会拒绝自动启动。窗口接入还使用目标进程句柄查询实际包身份，并确认映像位于系统返回的包安装目录内。仅在路径中放入 `OpenAI.Codex_`、重命名进程或自报应用 ID 都不能取得信任。开发模式松散包、自签包及其他来源不受支持；查询失败时保留失败状态，不接管其窗口。
+
+系统 Explorer 和 Windows PowerShell 的路径通过 Windows 系统 API 获取并以完整路径启动，不从启动器目录、`PATH` 或可编辑环境变量寻找同名程序。CMD 恢复/重扫入口通过同目录启动器执行对应操作；需保留完整程序包。
 
 ## 校准视频中的屏幕
 

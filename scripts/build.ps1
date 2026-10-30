@@ -23,6 +23,7 @@ if ($IconPath) {
     $argsList += '/win32icon:' + $resolvedIcon
 }
 $argsList += Join-Path $repoRoot 'src/DragonCodexBoot.cs'
+$argsList += Join-Path $repoRoot 'src/WindowsSecurity.cs'
 & $compiler @argsList
 if ($LASTEXITCODE -ne 0) { throw 'Compilation failed.' }
 $configPath = Join-Path $outputRoot 'launcher.json'

@@ -17,7 +17,7 @@ macOS 的淡出会揭示 Codex 当前窗口；它不复刻 Windows 版依靠 DWM
 ## Windows 版功能
 
 1. 居中播放启动视频，默认窗口为 **1920 × 1080 物理像素**。
-2. 同时打开已安装的 Codex 客户端；如果客户端已开，衔接到现有窗口。
+2. 同时打开已安装的官方 Codex 客户端；如果客户端已开，验证进程身份后衔接到现有窗口。
 3. 客户端尚未出现时，在可配置的动画节点暂停等待。
 4. 把真实客户端客户区对齐到播放窗口，以 Windows DWM 实时缩略图填入动画里的屏幕。
 5. 随着动画屏幕扩大，真实界面逐渐显现；视频结束后撤掉播放窗口，把操作交还给客户端。
@@ -29,7 +29,7 @@ macOS 的淡出会揭示 Codex 当前窗口；它不复刻 Windows 版依靠 DWM
 ## Windows 版环境
 
 - Windows 10/11 x64，.NET Framework 4.8。
-- 已安装 Windows 版 Codex 桌面客户端。
+- 已安装来自 Microsoft Store 的官方 Codex 桌面客户端，包系列为 `OpenAI.Codex_2p2nqsd0c76g0`。
 - 本地 MP4，建议 H.264 视频与 AAC 音频、16:9。
 - 播放依赖 Windows 自带媒体能力。Windows N 等缺少媒体组件的系统可能无法播放。
 
@@ -39,7 +39,7 @@ macOS 的淡出会揭示 Codex 当前窗口；它不复刻 Windows 版依靠 DWM
 
 从仓库的 **Releases** 下载 `DragonCodexBoot-版本-win-x64-with-video.zip`，解压到一个长期保留的位置，然后双击 **DragonCodexBoot.exe**。
 
-程序包已经包含 `media/startup.mp4` 与匹配这段动画的配置。已安装 Codex 且客户端标识与示例一致时，即可播放动画并接入客户端；标识不一致时参考 [配置说明](docs/CONFIGURATION.md) 更新 `AppLaunch`。
+程序包已经包含 `media/startup.mp4` 与匹配这段动画的配置。启动器通过系统完整路径调用 Windows 程序，并验证目标进程的官方包系列、Store 来源及安装位置；开发包、无包身份或身份不匹配的进程不会接收窗口交接。配置不能扩大允许的客户端身份，详见 [配置说明](docs/CONFIGURATION.md)。
 
 ### 默认自动替换启动入口
 

@@ -12,6 +12,17 @@ namespace DragonCodexBoot {
   private static extern SafeFileHandle CreateFile(string path,uint access,uint share,IntPtr security,uint creation,uint flags,IntPtr template);
   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
   private static extern uint GetFinalPathNameByHandle(SafeFileHandle handle,StringBuilder path,uint length,uint flags);
+  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
+  private static extern uint GetFullPathName(string path,uint length,StringBuilder result,IntPtr filePart);
+  public static string Normalize(string path) {
+   // Unlike Path.GetFullPath, this preserves short names for the later physical-path comparison.
+   // https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-getfullpathnamew
+   StringBuilder result=new StringBuilder(32768);
+   uint length=GetFullPathName(path,(uint)result.Capacity,result,IntPtr.Zero);
+   if(length==0)throw new Win32Exception(Marshal.GetLastWin32Error());
+   if(length>=result.Capacity)throw new InvalidOperationException("Entrypoint path is too long.");
+   return result.ToString();
+  }
   public static string Resolve(string path) {
    // Resolve the actual object before trusting lexical path boundaries.
    // https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew
@@ -45,11 +56,15 @@ function Get-EntrypointPath([string]$Path) {
     if ($Path -notmatch '^[A-Za-z]:[\\/]' -or $Path.Substring(2).Contains(':')) {
         throw 'Entrypoint paths must be local, fully qualified drive paths without alternate data streams.'
     }
-    $full=[IO.Path]::GetFullPath($Path)
-    if ($full -ne [IO.Path]::GetPathRoot($full)) { $full=$full.TrimEnd('\','/') }
-    foreach ($part in $full.Substring(3).Split([char[]]@('\','/'))) {
-        if ($part -ne $part.TrimEnd(' ','.')) { throw 'Entrypoint paths cannot contain trailing-dot or trailing-space aliases.' }
+    foreach ($part in $Path.Substring(3).Split([char[]]@('\','/'))) {
+        if ($part -ne '.' -and $part -ne '..' -and $part -ne $part.TrimEnd(' ','.')) {
+            throw 'Entrypoint paths cannot contain trailing-dot or trailing-space aliases.'
+        }
     }
+    # Retain .NET's invalid-path validation, but do not use its expanded short-name result.
+    $null=[IO.Path]::GetFullPath($Path)
+    $full=[DragonCodexBoot.EntrypointNativePath]::Normalize($Path)
+    if ($full -ne [IO.Path]::GetPathRoot($full)) { $full=$full.TrimEnd('\','/') }
     return $full
 }
 function Test-EntrypointWithin([string]$Path,[string]$Root) {
@@ -104,7 +119,8 @@ function Assert-EntrypointPath([string]$Path,[switch]$AllowMissing,[switch]$Dire
             }
             $leaf=$false
         }
-        $parent=[IO.Path]::GetDirectoryName($current)
+        # GetDirectoryName can expand short names in legacy .NET, including on missing children.
+        $parent=$current.Substring(0,[Math]::Max(3,$current.LastIndexOf([char]'\')))
         if (!$parent -or $parent -eq $current) { break }
         $current=$parent
     }

@@ -175,8 +175,19 @@ $shortAlias=(New-Object -ComObject Scripting.FileSystemObject).GetFolder($linksR
 $aliasChecked=$false
 if ($shortAlias -ine $linksRoot) {
     Reject { Assert-EntrypointPath $shortAlias -Directory } 'Short-name aliases must not bypass the physical path boundary.'
+    Reject { Assert-EntrypointPath ($shortAlias+'\missing\new-link.lnk') -AllowMissing } 'Short-name ancestors of missing paths must not bypass the physical path boundary.'
     $aliasChecked=$true
 }
+$shortAppAlias=(New-Object -ComObject Scripting.FileSystemObject).GetFolder($appRoot).ShortPath
+if ($shortAppAlias -ine $appRoot) {
+    Reject { & $integration -Action Verify -AppRoot $shortAppAlias -SearchRoots $linksRoot } 'Installation path normalization must not authorize a short-name alias.'
+}
+foreach ($suffix in @('.',' ')) {
+    Reject { Assert-EntrypointPath ($linksRoot+$suffix) -Directory } 'Trailing-dot and trailing-space directory aliases must be rejected before normalization.'
+    Reject { Assert-EntrypointPath ($linksRoot+$suffix+'\missing\new-link.lnk') -AllowMissing } 'Trailing-dot and trailing-space ancestors of missing paths must be rejected before normalization.'
+}
+Assert-EntrypointPath ($linksRoot+'\nested\..\.') -Directory
+Check $true 'Ordinary dot and parent-directory navigation must remain supported for a private path.'
 $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
 if ((New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     $ownerAcl=Get-Acl -LiteralPath $aclRoot

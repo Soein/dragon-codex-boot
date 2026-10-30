@@ -121,9 +121,6 @@ namespace DragonCodexBoot {
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h,IntPtr after,int x,int y,int w,int ht,uint flags);
   [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr h,uint msg,IntPtr w,IntPtr l,uint flags,uint ms,out IntPtr result);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
-  [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(uint access,bool inherit,int pid);
-  [DllImport("kernel32.dll",CharSet=CharSet.Unicode)] public static extern bool QueryFullProcessImageName(IntPtr h,uint flags,StringBuilder path,ref int length);
-  [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
   [DllImport("dwmapi.dll")] public static extern int DwmRegisterThumbnail(IntPtr dest,IntPtr source,out IntPtr thumb);
   [DllImport("dwmapi.dll")] public static extern int DwmUnregisterThumbnail(IntPtr thumb);
   [DllImport("dwmapi.dll")] public static extern int DwmUpdateThumbnailProperties(IntPtr thumb,ref ThumbProperties props);
@@ -133,37 +130,50 @@ namespace DragonCodexBoot {
    if(!GetClientRect(h,out r)||!ClientToScreen(h,ref p))return new Bounds();
    return new Bounds(p.X,p.Y,r.Width,r.Height);
   }
-  public static bool Responsive(IntPtr h) {
-   IntPtr result;
-   return h!=IntPtr.Zero&&SendMessageTimeout(h,0,IntPtr.Zero,IntPtr.Zero,2,80,out result)!=IntPtr.Zero;
+  public static Bounds TargetClientBounds(TrustedAppWindow app) {
+   return app!=null&&app.IsCurrent?ClientBounds(app.Handle):new Bounds();
   }
-  public static bool AlignClient(IntPtr h,Bounds desired) {
-   if(IsIconic(h)||IsZoomed(h))ShowWindow(h,9);
+  public static bool Responsive(TrustedAppWindow app) {
+   IntPtr result;
+   return app!=null&&app.IsCurrent&&SendMessageTimeout(app.Handle,0,IntPtr.Zero,IntPtr.Zero,2,80,out result)!=IntPtr.Zero;
+  }
+  public static void RestoreTarget(TrustedAppWindow app) {
+   if(app!=null&&app.IsCurrent&&IsIconic(app.Handle)&&app.IsCurrent)ShowWindow(app.Handle,9);
+  }
+  public static bool ForegroundTarget(TrustedAppWindow app) {
+   return app!=null&&app.IsCurrent&&SetForegroundWindow(app.Handle);
+  }
+  public static int RegisterTargetThumbnail(IntPtr host,TrustedAppWindow app,out IntPtr thumbnail) {
+   thumbnail=IntPtr.Zero;
+   if(app==null||!app.IsCurrent)return unchecked((int)0x80070006);
+   int result=DwmRegisterThumbnail(host,app.Handle,out thumbnail);
+   if(result==0&&!app.IsCurrent) {
+    DwmUnregisterThumbnail(thumbnail);thumbnail=IntPtr.Zero;return unchecked((int)0x80070006);
+   }
+   return result;
+  }
+  public static bool AlignClient(TrustedAppWindow app,Bounds desired) {
+   if(app==null||!app.IsCurrent)return false;
+   IntPtr h=app.Handle;
+   if((IsIconic(h)||IsZoomed(h))&&app.IsCurrent)ShowWindow(h,9);
    // Measure again after resizing: a restored Chromium window can change frame insets.
    for(int attempt=0;attempt<2;attempt++) {
-    Bounds window,client=ClientBounds(h);
+    if(!app.IsCurrent)return false;
+    Bounds window,client=TargetClientBounds(app);
     if(!GetWindowRect(h,out window)||client.Width<=0||client.Height<=0)return false;
     Bounds outer=Geometry.WindowForClient(window,client,desired);
-    if(!SetWindowPos(h,IntPtr.Zero,outer.Left,outer.Top,outer.Width,outer.Height,0x4|0x10|0x200))return false;
+    if(!app.IsCurrent||!SetWindowPos(h,IntPtr.Zero,outer.Left,outer.Top,outer.Width,outer.Height,0x4|0x10|0x200))return false;
    }
-   Bounds actual=ClientBounds(h);
+   Bounds actual=TargetClientBounds(app);
    return Math.Abs(actual.Left-desired.Left)<=2&&Math.Abs(actual.Top-desired.Top)<=2
     &&Math.Abs(actual.Width-desired.Width)<=2&&Math.Abs(actual.Height-desired.Height)<=2;
   }
-  public static IntPtr FindApp(Config cfg) {
+  public static TrustedAppWindow FindApp(Config cfg) {
    HashSet<int> pids=new HashSet<int>();
    foreach(string name in cfg.ProcessNames)foreach(Process p in Process.GetProcessesByName(name)) {
-    try {
-     string path="";
-     IntPtr process=OpenProcess(0x1000,false,p.Id);
-     if(process!=IntPtr.Zero) {
-      try { StringBuilder buffer=new StringBuilder(4096);int length=buffer.Capacity;if(QueryFullProcessImageName(process,0,buffer,ref length))path=buffer.ToString(); }
-      finally { CloseHandle(process); }
-     }
-     if(path.IndexOf(cfg.ProcessPathContains,StringComparison.OrdinalIgnoreCase)>=0)pids.Add(p.Id);
-    } catch {} finally { p.Dispose(); }
+    try { pids.Add(p.Id); } catch {} finally { p.Dispose(); }
    }
-   IntPtr found=IntPtr.Zero;
+   TrustedAppWindow found=null;
    EnumWindows(delegate(IntPtr h,IntPtr unused) {
     uint pid;GetWindowThreadProcessId(h,out pid);
     if(!pids.Contains((int)pid)||!IsWindowVisible(h)||GetWindow(h,4)!=IntPtr.Zero||(GetWindowLong(h,-20)&0x80)!=0)return true;
@@ -171,7 +181,8 @@ namespace DragonCodexBoot {
     if(DwmGetWindowAttribute(h,14,out cloaked,4)==0&&cloaked!=0)return true;
     Bounds b=ClientBounds(h);
     if(b.Width<450||b.Height<280)return true;
-    found=h;return false; // Frontmost eligible main window; no title or screenshot is recorded.
+    found=TrustedAppWindow.Open(h,cfg);
+    return found==null; // Frontmost trusted main window; no title or screenshot is recorded.
    },IntPtr.Zero);
    return found;
   }
@@ -183,7 +194,8 @@ namespace DragonCodexBoot {
   private readonly TextBlock status;
   private readonly DispatcherTimer timer;
   private readonly Stopwatch wall=new Stopwatch();
-  private IntPtr host,target,thumbnail,stableHandle,alignedHandle;
+  private IntPtr host,thumbnail,stableHandle,alignedHandle;
+  private TrustedAppWindow target;
   private Bounds initialBounds;
   private double stableSince,lastProbe=-1;
   private bool ready,opened,holding,closing,startedFade,thumbnailFailed;
@@ -193,7 +205,7 @@ namespace DragonCodexBoot {
    WindowStyle=WindowStyle.None;ResizeMode=ResizeMode.NoResize;ShowInTaskbar=false;
    AllowsTransparency=false;Topmost=true;Background=new SolidColorBrush(Color.FromRgb(250,247,253));
    target=Native.FindApp(cfg);
-   System.Windows.Forms.Screen screen=target!=IntPtr.Zero?System.Windows.Forms.Screen.FromHandle(target)
+   System.Windows.Forms.Screen screen=target!=null&&target.IsCurrent?System.Windows.Forms.Screen.FromHandle(target.Handle)
     :System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position);
    System.Drawing.Rectangle monitor=screen.Bounds;
    initialBounds=Geometry.Centered(new Bounds(monitor.Left,monitor.Top,monitor.Width,monitor.Height),cfg.PlayerWidth,cfg.PlayerHeight);
@@ -220,7 +232,7 @@ namespace DragonCodexBoot {
    };
    Loaded+=delegate {
     wall.Start();
-    if(target==IntPtr.Zero)LaunchApp();
+    if(target==null||!target.IsCurrent) { ClearTarget();LaunchApp(); }
     media.Source=new Uri(Path.GetFullPath(Path.Combine(root,cfg.Video)));
     media.Play();timer.Start();Log("started fixed-player="+initialBounds.Width+"x"+initialBounds.Height
      +" at "+initialBounds.Left+","+initialBounds.Top);
@@ -237,7 +249,7 @@ namespace DragonCodexBoot {
    media.MediaEnded+=delegate { endedAt=wall.Elapsed.TotalSeconds;HandOff(); };
    timer=new DispatcherTimer(DispatcherPriority.Render);timer.Interval=TimeSpan.FromMilliseconds(16);
    timer.Tick+=Tick;
-   Closed+=delegate { timer.Stop();media.Stop();DropThumbnail(); };
+   Closed+=delegate { timer.Stop();media.Stop();ClearTarget(); };
   }
   private IntPtr FixedBoundsHook(IntPtr hwnd,int message,IntPtr wParam,IntPtr lParam,ref bool handled) {
    if(message==0x0046&&!closing&&lParam!=IntPtr.Zero) {
@@ -249,40 +261,49 @@ namespace DragonCodexBoot {
    return IntPtr.Zero;
   }
   private void AlignTarget() {
-   if(!cfg.MatchClientToPlayer||target==IntPtr.Zero||alignedHandle==target)return;
-   bool aligned=Native.AlignClient(target,initialBounds);alignedHandle=target;
+   if(!cfg.MatchClientToPlayer||target==null||!target.IsCurrent||alignedHandle==target.Handle)return;
+   bool aligned=Native.AlignClient(target,initialBounds);alignedHandle=target.Handle;
    Log(aligned?"real-window-aligned-to-fixed-player":"real-window-alignment-inexact");
    Native.SetForegroundWindow(host);
   }
   private void LaunchApp() {
    try {
+    PackageIdentity[] packages;
+    int error=WindowsPackageReader.ReadRegisteredHeads(out packages);
+    if(!PackageTrust.AcceptsRegistrations(error,packages))throw new InvalidOperationException("未找到受支持的官方Codex Store安装，已拒绝自动启动。");
     // Shell launches the packaged desktop app; its CLI helper is never used as a UI executable.
-    Process.Start(new ProcessStartInfo("explorer.exe",cfg.AppLaunch) { UseShellExecute=true });
+    using(Process process=Process.Start(SystemExecutables.ExplorerStartInfo(cfg.AppLaunch))) {}
     Log("app-launch-requested");
    } catch(Exception e) { Log("app-launch-failed: "+e.Message);status.Text="无法自动打开Codex，按Esc退出";status.Visibility=Visibility.Visible; }
   }
   private void Probe() {
    double now=wall.Elapsed.TotalSeconds;
    if(now-lastProbe<.25)return;lastProbe=now;
-   IntPtr candidate=Native.FindApp(cfg);
-   if(candidate==IntPtr.Zero||!Native.Responsive(candidate)) { ready=false;stableHandle=IntPtr.Zero;return; }
-   if(Native.IsIconic(candidate))Native.ShowWindow(candidate,9);
-   if(candidate!=stableHandle) { stableHandle=candidate;stableSince=now;ready=false; }
+   if(target==null)target=Native.FindApp(cfg);
+   if(target==null||!Native.Responsive(target)) { ready=false;stableHandle=IntPtr.Zero;DropThumbnail();return; }
+   Native.RestoreTarget(target);
+   if(target.Handle!=stableHandle) { stableHandle=target.Handle;stableSince=now;ready=false; }
    else ready=now-stableSince>=.6;
-   target=candidate;
    // Visible/responsive/stable is a window heuristic, not an official Codex content-ready event.
   }
   private void RegisterThumbnail() {
    if(thumbnail!=IntPtr.Zero||thumbnailFailed)return;
-   int hr=Native.DwmRegisterThumbnail(host,target,out thumbnail);
+   int hr=Native.RegisterTargetThumbnail(host,target,out thumbnail);
    if(hr!=0) { thumbnail=IntPtr.Zero;thumbnailFailed=true;Log("dwm-unavailable: "+hr); }
    else Log("live-window-connected");
   }
   private void DropThumbnail() {
    if(thumbnail!=IntPtr.Zero) { Native.DwmUnregisterThumbnail(thumbnail);thumbnail=IntPtr.Zero; }
   }
+  private void ClearTarget() {
+   DropThumbnail();
+   if(target!=null) { target.Dispose();target=null; }
+   ready=false;stableHandle=alignedHandle=IntPtr.Zero;startedFade=false;thumbnailFailed=false;
+   if(!closing)Opacity=1;
+  }
   private void Tick(object sender,EventArgs e) {
    if(closing)return;
+   if(target!=null&&!target.IsCurrent)ClearTarget();
    Probe();
    if(wall.Elapsed.TotalSeconds>cfg.MaxWaitSeconds+20) { Log("wait-timeout");HandOff();return; }
    if(!opened) {
@@ -302,10 +323,11 @@ namespace DragonCodexBoot {
    if(t>=cfg.TransitionStart&&ready) {
     startedFade=true;RegisterThumbnail();
     double a=Geometry.Ease((t-cfg.TransitionStart)/(cfg.TransitionEnd-cfg.TransitionStart));
-    Bounds targetBounds=Native.ClientBounds(target);
+    Bounds targetBounds=Native.TargetClientBounds(target);
     if(targetBounds.Width<450) { HandOff();return; }
     Bounds hostBounds=initialBounds;
     if(thumbnail!=IntPtr.Zero) {
+     if(target==null||!target.IsCurrent) { ClearTarget();return; }
      Native.ThumbProperties props=new Native.ThumbProperties {
       Flags=1|4|8|16,Destination=Geometry.Dest(cfg.ScreenFrames,t,hostBounds.Width,hostBounds.Height,a),
       Opacity=(byte)Math.Round(255*a),Visible=true,ClientOnly=true
@@ -321,13 +343,14 @@ namespace DragonCodexBoot {
   private void HandOff() {
    if(closing)return;closing=true;
    timer.Stop();DropThumbnail();
-   IntPtr app=Native.FindApp(cfg);
-   if(app!=IntPtr.Zero) {
-    if(Native.IsIconic(app))Native.ShowWindow(app,9);
-    // Removes the covering window and hands input to the real application.
-    Close();Native.SetForegroundWindow(app);Log("handed-off-to-real-window");
-   } else {
-    Close();Log("closed-without-window");
+   TrustedAppWindow app=target;target=null;
+   if(app!=null&&!app.IsCurrent) { app.Dispose();app=null; }
+   if(app==null)app=Native.FindApp(cfg);
+   using(app) {
+    Native.RestoreTarget(app);
+    // Remove the covering window before handing input to the still-bound process.
+    Close();
+    Log(Native.ForegroundTarget(app)?"handed-off-to-real-window":"closed-without-verified-handoff");
    }
   }
   private void Log(string s) {
@@ -342,7 +365,7 @@ namespace DragonCodexBoot {
   private static int Integrate(string root,string action,bool wait) {
    string script=Path.Combine(root,"scripts","integrate-entrypoints.ps1");
    if(!File.Exists(script))throw new FileNotFoundException("启动入口脚本缺失，请完整解压程序包。",script);
-   string powershell=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),"WindowsPowerShell","v1.0","powershell.exe");
+   string powershell=SystemExecutables.PowerShellPath;
    // Paths are local Windows filenames (quotes cannot occur); never concatenate configuration into shell commands.
    ProcessStartInfo info=new ProcessStartInfo(powershell,"-NoProfile -ExecutionPolicy Bypass -File \""+script+"\" -Action "+action+" -AppRoot \""+root.TrimEnd('\\','/')+"\"") {
     UseShellExecute=false,CreateNoWindow=true,WorkingDirectory=root,WindowStyle=ProcessWindowStyle.Hidden
@@ -362,9 +385,9 @@ namespace DragonCodexBoot {
    if(c==null||String.IsNullOrEmpty(c.Video)||String.IsNullOrEmpty(c.AppLaunch)||String.IsNullOrEmpty(c.ProcessPathContains)
     ||c.ProcessNames==null||c.ProcessNames.Length==0||c.ScreenFrames==null||c.ScreenFrames.Count<2)throw new ArgumentException("启动器配置不完整");
    string appPrefix="shell:AppsFolder\\";
-   if(!c.AppLaunch.StartsWith(appPrefix,StringComparison.OrdinalIgnoreCase)
+   if(!PackageTrust.IsOfficialLaunch(c.AppLaunch)||!c.AppLaunch.StartsWith(appPrefix,StringComparison.OrdinalIgnoreCase)
     ||!System.Text.RegularExpressions.Regex.IsMatch(c.AppLaunch.Substring(appPrefix.Length),@"^[A-Za-z0-9_.-]+![A-Za-z0-9_.-]+$"))
-    throw new ArgumentException("AppLaunch必须是已安装应用的shell:AppsFolder标识。");
+    throw new ArgumentException("AppLaunch必须使用受支持的官方Codex Store包标识。");
    if(String.IsNullOrWhiteSpace(c.Video)||String.IsNullOrWhiteSpace(c.ProcessPathContains)
     ||c.ProcessNames.Any(n=>String.IsNullOrWhiteSpace(n)||!System.Text.RegularExpressions.Regex.IsMatch(n,@"^[A-Za-z0-9_.-]+$")))
     throw new ArgumentException("视频路径或进程匹配配置无效。");
