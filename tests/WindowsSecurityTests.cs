@@ -55,6 +55,30 @@ internal static class WindowsSecurityTests {
   }
   return 0;
  }
+ private static void TraceRegistration(string fullName) {
+  uint origin;int result=PackageNative.GetStagedPackageOrigin(fullName,out origin);
+  Console.WriteLine("METADATA GetStagedPackageOrigin: result={0}, origin={1}",result,origin);
+  IntPtr reference;result=PackageNative.OpenPackageInfoByFullName(fullName,0,out reference);
+  Console.WriteLine("METADATA OpenPackageInfoByFullName: result={0}, referencePresent={1}, pointerSize={2}, headerSize={3}",result,reference!=IntPtr.Zero,IntPtr.Size,Marshal.SizeOf(typeof(PackageNative.PackageInfoHeader)));
+  if(result!=0||reference==IntPtr.Zero)return;
+  try {
+   foreach(uint flags in new uint[] {0x00000010,0}) {
+    uint length=0,count;IntPtr buffer=IntPtr.Zero;
+    result=PackageNative.GetPackageInfo(reference,flags,ref length,IntPtr.Zero,out count);
+    Console.WriteLine("METADATA GetPackageInfo(size): flags=0x{0:X}, result={1}, length={2}, count={3}",flags,result,length,count);
+    if(result!=PackageNative.InsufficientBuffer||length<Marshal.SizeOf(typeof(PackageNative.PackageInfoHeader))||length>1024*1024)continue;
+    try {
+     buffer=Marshal.AllocHGlobal((int)length);
+     result=PackageNative.GetPackageInfo(reference,flags,ref length,buffer,out count);
+     Console.WriteLine("METADATA GetPackageInfo(data): flags=0x{0:X}, result={1}, length={2}, count={3}",flags,result,length,count);
+     if(result==0&&count>0) {
+      PackageNative.PackageInfoHeader header=(PackageNative.PackageInfoHeader)Marshal.PtrToStructure(buffer,typeof(PackageNative.PackageInfoHeader));
+      Console.WriteLine("METADATA decoded first PACKAGE_INFO: flags=0x{0:X}, fullName={1}, family={2}, path={3}",header.Flags,Marshal.PtrToStringUni(header.FullName),Marshal.PtrToStringUni(header.Family),Marshal.PtrToStringUni(header.Path));
+     }
+    } finally { if(buffer!=IntPtr.Zero)Marshal.FreeHGlobal(buffer); }
+   }
+  } finally { Console.WriteLine("METADATA ClosePackageInfo: result={0}",PackageNative.ClosePackageInfo(reference)); }
+ }
  private static void ProcessChecks(string fixture,string executable,string otherPackage,out bool metadataChecked) {
   metadataChecked=false;
   PackageIdentity identity;
@@ -69,6 +93,8 @@ internal static class WindowsSecurityTests {
   if(enumeration!=0)Check(!PackageTrust.AcceptsRegistrations(enumeration,registered),"A failed real enumeration must not authorize launch.");
   if(!String.IsNullOrEmpty(otherPackage)) {
    int result=WindowsPackageReader.ReadRegistration(otherPackage,out identity);
+   Console.WriteLine("METADATA selectedPackage={0}, ReadRegistration.result={1}, identityPresent={2}",otherPackage,result,identity!=null);
+   if(result!=0||identity==null)TraceRegistration(otherPackage);
    Check(result==0&&identity!=null,"Read a real installed package to exercise metadata P/Invoke and structure layout.");
    Check(identity.Family!=PackageTrust.OfficialFamily&&!PackageTrust.AcceptsRegistration(result,identity),"A real installed unrelated package must remain unauthorized.");
    metadataChecked=true;
