@@ -174,6 +174,15 @@ Check (!(Test-Path -LiteralPath (Join-Path $foreignState 'backups')) -and !(Test
 $shortAlias=(New-Object -ComObject Scripting.FileSystemObject).GetFolder($linksRoot).ShortPath
 $aliasChecked=$false
 if ($shortAlias -ine $linksRoot) {
+    $aliasDiagnostic=[ordered]@{
+        original=$shortAlias
+        expected=$linksRoot
+        fullPath=[IO.Path]::GetFullPath($shortAlias)
+        entrypointPath=Get-EntrypointPath $shortAlias
+        resolvedShort=[DragonCodexBoot.EntrypointNativePath]::Resolve($shortAlias)
+        resolvedLong=[DragonCodexBoot.EntrypointNativePath]::Resolve($linksRoot)
+    }
+    Write-Output ('Entrypoint short-name diagnostic: '+($aliasDiagnostic | ConvertTo-Json -Compress))
     Reject { Assert-EntrypointPath $shortAlias -Directory } 'Short-name aliases must not bypass the physical path boundary.'
     $aliasChecked=$true
 }
