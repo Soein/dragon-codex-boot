@@ -24,8 +24,10 @@ namespace DragonCodexBoot {
    if(write&&!createdForWrite)throw new InvalidOperationException("Writes require a new private temporary file.");
    SafeFileHandle data=file;
    if(!createdForWrite) {
-    data=LocalMediaPath.ReOpenFile(file,write?0xC0000000:0x80000000,1,LocalMediaPath.NoFollowNoRecall);
-    if(data.IsInvalid) { int error=Marshal.GetLastWin32Error();data.Dispose();throw NativeErrors.Create(error,"ReOpenFile(access=GENERIC_READ, share=READ, flags=0x00300000) cannot open the verified local file."); }
+    // Retain NO_RECALL on the metadata open; passing it to ReOpenFile returns error 87 on Windows.
+    LocalMediaPath.CheckHandle(file,false);
+    data=LocalMediaPath.ReOpenFile(file,0x80000000,1,0x00200000);
+    if(data.IsInvalid) { int error=Marshal.GetLastWin32Error();data.Dispose();throw NativeErrors.Create(error,"ReOpenFile(access=GENERIC_READ, share=READ, flags=0x00200000) cannot open the verified local file."); }
     handles.Add(data);
    }
    LocalMediaPath.CheckHandle(data,false);
