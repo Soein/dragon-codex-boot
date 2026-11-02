@@ -13,6 +13,12 @@ private final class ForbiddenActivation: NSRunningApplication, @unchecked Sendab
 private struct StandaloneSecurityTests {
     static func main() {
         let launcher = Launcher()
+        if CommandLine.arguments.contains("--launch-rejection") {
+            launcher.targetURL = URL(fileURLWithPath: CommandLine.arguments[2])
+            launcher.launchTarget()
+            fputs("FAIL: standalone launch returned without rejecting an ordinary file\n", stderr)
+            exit(3)
+        }
         launcher.target = ForbiddenActivation(processIdentifier: pid_t(CommandLine.arguments[1])!)
         launcher.handoff()
         fputs("FAIL: standalone handoff returned without rejecting the untrusted PID\n", stderr)

@@ -14,9 +14,42 @@ private struct SecurityAPITests {
         catch { print("PASS: \(message)") }
     }
 
+    static func checkLocationPolicy(in directory: URL) throws {
+        let files = FileManager.default
+        let tree = directory.appendingPathComponent("location-test", isDirectory: true)
+        let file = tree.appendingPathComponent("resource")
+        try files.createDirectory(at: tree, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        try Data("fixture".utf8).write(to: file)
+        try LocalPathSecurity.validateBundleTree(at: tree)
+        let link = tree.appendingPathComponent("resource-link")
+        try files.createSymbolicLink(atPath: link.path, withDestinationPath: "resource")
+        try LocalPathSecurity.validateBundleTree(at: tree)
+        try files.removeItem(at: link)
+        try files.createSymbolicLink(atPath: link.path, withDestinationPath: "../")
+        rejects("links cannot leave the bundle tree") { try LocalPathSecurity.validateBundleTree(at: tree) }
+        try files.removeItem(at: link)
+        try files.setAttributes([.posixPermissions: 0o666], ofItemAtPath: file.path)
+        rejects("another account cannot write signed bundle contents") { try LocalPathSecurity.validateBundleTree(at: tree) }
+        try files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        let chmod = Process()
+        chmod.executableURL = URL(fileURLWithPath: "/bin/chmod")
+        chmod.arguments = ["+a", "everyone allow write", file.path]
+        try chmod.run()
+        chmod.waitUntilExit()
+        check(chmod.terminationStatus == 0, "created a write ACL on the test resource")
+        rejects("ACL write access cannot override safe mode bits") { try LocalPathSecurity.validateBundleTree(at: tree) }
+        try files.removeItem(at: file)
+        let nested = tree.appendingPathComponent("Client.app", isDirectory: true)
+        try files.createDirectory(at: nested, withIntermediateDirectories: false)
+        try files.setAttributes([.posixPermissions: 0o777], ofItemAtPath: tree.path)
+        rejects("another account cannot replace a bundle via its parent") { try LocalPathSecurity.validateBundleTree(at: nested) }
+        rejects("a replaceable application directory is rejected") { try LocalPathSecurity.validateBundleTree(at: tree) }
+    }
+
     static func main() throws {
         let fixture = URL(fileURLWithPath: CommandLine.arguments[1])
         let fixturePID = pid_t(CommandLine.arguments[2])!
+        try checkLocationPolicy(in: fixture.deletingLastPathComponent())
         var staticCode: SecStaticCode?
         check(SecStaticCodeCreateWithPath(fixture as CFURL, [], &staticCode) == errSecSuccess, "fixture has a real Security static code object")
         check(SecStaticCodeCheckValidity(staticCode!, [], nil) == errSecSuccess, "fixture ad-hoc signature is valid without publisher requirements")
@@ -39,8 +72,14 @@ private struct SecurityAPITests {
         check(try TrustedApplication.validateBundleIdentifier("") == "com.openai.codex", "empty identity preserves official Codex")
 
         if let path = ProcessInfo.processInfo.environment["DRAGON_CODEX_SECURITY_OFFICIAL_APP"] {
-            try TrustedApplication.validateApplication(at: URL(fileURLWithPath: path))
-            print("PASS: official Codex bundle is accepted")
+            let alias = fixture.deletingLastPathComponent().appendingPathComponent("Selected.app")
+            let official = URL(fileURLWithPath: path)
+            try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: official)
+            let launch = try TrustedApplication.validatedLaunchURL(at: alias)
+            try FileManager.default.removeItem(at: alias)
+            try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: fixture)
+            let physical = try LocalPathSecurity.physicalURL(official)
+            check(launch.path == physical.path && launch.path != alias.path, "switching a discovery alias cannot change the validated launch URL")
             let applications = NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex")
             check(!applications.isEmpty, "an existing official Codex PID is available without launching it")
             for application in applications {

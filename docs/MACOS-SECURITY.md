@@ -10,6 +10,8 @@
 
 脚本处理路径误配置和预先放置的链接，不提供抵御同一用户在检查与操作之间主动改动目录的隔离边界。`--user-root /absolute/directory` 可显式选择当前用户所有的目录以便测试，不修改 `HOME`；常规安装无需使用此参数。安装测试以 `/private/tmp` 为根并替换 `launchctl`，不注册真实登录项。
 
+注册登录监视器请运行安装脚本，移除时运行卸载脚本。旧的可执行文件参数 `--install-integration` 和 `--uninstall-integration` 会退出并提示对应脚本。安装程序会检查 POSIX 权限、所有者和 ACL，拒绝其他普通账户能够替换程序或登录项的位置。
+
 ## 本地与正式发布
 
 | 模式 | 签名与产物 |
@@ -18,6 +20,8 @@
 | `--mode release` | 指定 Developer ID Application 身份、Hardened Runtime、安全时间戳、Apple 公证、票据装订及验证，最终 ZIP 名称含 `-notarized`。 |
 
 两种 App 共用 `package-macos.sh`，通过 `--variant standalone`（默认）或 `--variant integration` 选择。`package-macos-standalone.sh` 保留为独立版入口。构建脚本也接受签名模式参数，但只有打包入口完成公证与最终 ZIP 生成。
+
+构建前请把视频作为普通文件放进仓库的 `media/startup.mp4`。构建与打包会检查素材和输出目录，拒绝通过符号链接读取工作树外的文件或覆盖外部产物。
 
 正式模式需由发布者事先准备：
 
@@ -33,6 +37,7 @@
 
 ```sh
 ./scripts/test-macos-install.sh
+./scripts/test-macos-build-safety.sh
 ./scripts/test-macos-release.sh
 ./scripts/test-macos-signature-requirement.sh
 ./scripts/test-macos.sh

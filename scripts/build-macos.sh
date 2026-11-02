@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build_root="$repo_root/build/macos"
 app_bundle="$repo_root/build/DragonCodexBoot.app"
+source "$repo_root/scripts/macos-path-safety.sh"
+macos_assert_safe_directory_chain "$repo_root"
+macos_assert_safe_regular_file "$repo_root/scripts/macos-signing-common.sh"
 source "$repo_root/scripts/macos-signing-common.sh"
 macos_signing_options "$@"
 
@@ -12,11 +16,29 @@ if [[ "$(uname -s)" != Darwin ]]; then
   exit 1
 fi
 architecture="$(uname -m)"
+macos_assert_safe_directory_chain "$build_root"
+macos_assert_safe_directory_chain "$app_bundle"
+if [[ -e "$build_root/DragonCodexBootMac" || -L "$build_root/DragonCodexBootMac" ]]; then
+  macos_assert_safe_regular_file "$build_root/DragonCodexBootMac"
+fi
+for input in \
+  "$repo_root/macos/Sources/DragonCodexBootCore/LauncherConfiguration.swift" \
+  "$repo_root/macos/Sources/DragonCodexBootCore/TrustedApplication.swift" \
+  "$repo_root/macos/Sources/DragonCodexBootMac/main.swift" \
+  "$repo_root/config/launcher.macos.example.json" "$repo_root/media/MEDIA_NOTICE.md" \
+  "$repo_root/LICENSE" "$repo_root/THIRD_PARTY_NOTICES.md"; do
+  macos_assert_safe_regular_file "$input"
+done
+if [[ -e "$repo_root/media/startup.mp4" || -L "$repo_root/media/startup.mp4" ]]; then
+  macos_assert_safe_regular_file "$repo_root/media/startup.mp4"
+fi
 mkdir -p "$build_root"
+work="$(mktemp -d "$build_root/.macos-build-XXXXXX")"
+trap 'rm -rf "$work"' EXIT
 swiftc \
   -O \
   -target "$architecture-apple-macosx13.0" \
-  -module-cache-path "$build_root/module-cache" \
+  -module-cache-path "$work/module-cache" \
   -parse-as-library \
   -module-name DragonCodexBootMac \
   -framework AppKit \

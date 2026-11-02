@@ -38,6 +38,88 @@ private enum LauncherError: LocalizedError {
     }
 }
 
+private enum RuntimeFiles {
+    static func directory(at url: URL, create: Bool) throws -> Int32 {
+        var descriptor = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard descriptor >= 0 else { throw failure() }
+        do {
+            // Foundation standardization can turn /private/tmp back into the /tmp symlink.
+            for component in url.pathComponents.dropFirst() {
+                let child = try directory(named: component, in: descriptor, create: create)
+                close(descriptor)
+                descriptor = child
+            }
+            return descriptor
+        } catch {
+            close(descriptor)
+            throw error
+        }
+    }
+
+    static func directory(named name: String, in parent: Int32, create: Bool) throws -> Int32 {
+        if create, mkdirat(parent, name, 0o700) != 0, errno != EEXIST { throw failure() }
+        let descriptor = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { throw failure() }
+        return descriptor
+    }
+
+    static func containsRegularFile(_ name: String, in directory: Int32) throws -> Bool {
+        var information = stat()
+        guard fstatat(directory, name, &information, AT_SYMLINK_NOFOLLOW) == 0 else {
+            if errno == ENOENT { return false }
+            throw failure()
+        }
+        guard information.st_mode & S_IFMT == S_IFREG else { throw POSIXError(.EINVAL) }
+        return true
+    }
+
+    static func regularFile(_ name: String, in directory: Int32) throws -> Int32 {
+        let descriptor = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else { throw failure() }
+        var information = stat()
+        guard fstat(descriptor, &information) == 0 else {
+            let error = failure()
+            close(descriptor)
+            throw error
+        }
+        guard information.st_mode & S_IFMT == S_IFREG else {
+            close(descriptor)
+            throw POSIXError(.EINVAL)
+        }
+        return descriptor
+    }
+
+    // Directory descriptors keep a renamed parent or a symlink swap from redirecting writes.
+    static func copyIfMissing(from source: URL, to name: String, in directory: Int32) throws {
+        guard try !containsRegularFile(name, in: directory) else { return }
+        let sourceDirectory = try self.directory(at: source.deletingLastPathComponent(), create: false)
+        defer { close(sourceDirectory) }
+        let sourceDescriptor = try regularFile(source.lastPathComponent, in: sourceDirectory)
+        defer { close(sourceDescriptor) }
+        let temporaryName = ".dragon-copy-\(UUID().uuidString)"
+        let targetDescriptor = openat(directory, temporaryName, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard targetDescriptor >= 0 else { throw failure() }
+        defer {
+            close(targetDescriptor)
+            unlinkat(directory, temporaryName, 0)
+        }
+        let input = FileHandle(fileDescriptor: sourceDescriptor, closeOnDealloc: false)
+        let output = FileHandle(fileDescriptor: targetDescriptor, closeOnDealloc: false)
+        while let data = try input.read(upToCount: 1024 * 1024), !data.isEmpty {
+            try output.write(contentsOf: data)
+        }
+        guard fsync(targetDescriptor) == 0 else { throw failure() }
+        // Publish only complete files; linkat never replaces an existing destination.
+        if linkat(directory, temporaryName, directory, name, 0) != 0 {
+            guard errno == EEXIST, try containsRegularFile(name, in: directory) else { throw failure() }
+        }
+    }
+
+    private static func failure() -> POSIXError {
+        POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+}
+
 private struct RuntimeConfiguration {
     let configuration: LauncherConfiguration
     let root: URL
@@ -48,92 +130,44 @@ private struct RuntimeConfiguration {
             for: .applicationSupportDirectory,
             in: .userDomainMask,
             appropriateFor: nil,
-            create: true
+            create: false
         ).appendingPathComponent("DragonCodexBoot", isDirectory: true)
-        try fileManager.createDirectory(at: supportRoot, withIntermediateDirectories: true)
+        return try load(supportRoot: supportRoot, resourceRoot: Bundle.main.resourceURL)
+    }
 
-        let configURL = supportRoot.appendingPathComponent("launcher.json")
-        if !fileManager.fileExists(atPath: configURL.path) {
-            guard let template = Bundle.main.resourceURL?.appendingPathComponent("launcher.macos.example.json"),
-                  fileManager.fileExists(atPath: template.path) else {
+    static func load(supportRoot: URL, resourceRoot: URL?) throws -> RuntimeConfiguration {
+        let directory = try RuntimeFiles.directory(at: supportRoot, create: true)
+        defer { close(directory) }
+        try LocalPathSecurity.validateUserDirectory(at: supportRoot, openedAs: directory)
+        if try !RuntimeFiles.containsRegularFile("launcher.json", in: directory) {
+            guard let template = resourceRoot?.appendingPathComponent("launcher.macos.example.json") else {
                 throw LauncherError.missingConfig
             }
-            try fileManager.copyItem(at: template, to: configURL)
+            try RuntimeFiles.copyIfMissing(from: template, to: "launcher.json", in: directory)
         }
-
-        let data = try Data(contentsOf: configURL)
+        let descriptor = try RuntimeFiles.regularFile("launcher.json", in: directory)
+        defer { close(descriptor) }
+        let data = try FileHandle(fileDescriptor: descriptor, closeOnDealloc: false).readToEnd() ?? Data()
         let configuration = try LauncherConfiguration.decode(from: data)
         let runtime = RuntimeConfiguration(configuration: configuration, root: supportRoot)
-        runtime.copyBundledVideoIfNeeded()
+        do { try runtime.copyBundledVideoIfNeeded(resourceRoot: resourceRoot) }
+        catch { NSLog("Could not copy bundled startup video: %@", error.localizedDescription) }
         return runtime
     }
 
-    private func copyBundledVideoIfNeeded() {
-        let target = configuration.videoURL(relativeTo: root)
-        guard !FileManager.default.fileExists(atPath: target.path),
-              let resourceRoot = Bundle.main.resourceURL else { return }
-        let relativeVideo = (configuration.video as NSString).expandingTildeInPath
-        guard !relativeVideo.hasPrefix("/") else { return }
-        let bundled = resourceRoot.appendingPathComponent(relativeVideo).standardizedFileURL
-        guard FileManager.default.fileExists(atPath: bundled.path) else { return }
-        do {
-            try FileManager.default.createDirectory(
-                at: target.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try FileManager.default.copyItem(at: bundled, to: target)
-        } catch {
-            NSLog("Could not copy bundled startup video: %@", error.localizedDescription)
-        }
-    }
-}
-
-private enum LaunchAgentIntegration {
-    static let label = "community.dragoncodexboot.codex-watcher"
-    static let plistName = "\(label).plist"
-
-    static func propertyList(executablePath: String) -> [String: Any] {
-        [
-            "Label": label,
-            "ProgramArguments": [executablePath, "--watch"],
-            "RunAtLoad": true,
-            "LimitLoadToSessionType": "Aqua",
-        ]
-    }
-
-    static func install(executablePath: String) throws -> URL {
-        let libraryDirectory = try FileManager.default.url(
-            for: .libraryDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
+    private func copyBundledVideoIfNeeded(resourceRoot: URL? = Bundle.main.resourceURL) throws {
+        guard configuration.video == "media/startup.mp4", let resourceRoot else { return }
+        let directory = try RuntimeFiles.directory(at: root, create: false)
+        defer { close(directory) }
+        try LocalPathSecurity.validateUserDirectory(at: root, openedAs: directory)
+        let mediaDirectory = try RuntimeFiles.directory(named: "media", in: directory, create: true)
+        defer { close(mediaDirectory) }
+        try LocalPathSecurity.validateUserDirectory(at: root.appendingPathComponent("media"), openedAs: mediaDirectory)
+        try RuntimeFiles.copyIfMissing(
+            from: resourceRoot.appendingPathComponent("media/startup.mp4"),
+            to: "startup.mp4",
+            in: mediaDirectory
         )
-        let launchAgentsDirectory = libraryDirectory.appendingPathComponent("LaunchAgents", isDirectory: true)
-        try FileManager.default.createDirectory(at: launchAgentsDirectory, withIntermediateDirectories: true)
-        let plistURL = launchAgentsDirectory.appendingPathComponent(plistName)
-        let data = try PropertyListSerialization.data(
-            fromPropertyList: propertyList(executablePath: executablePath),
-            format: .xml,
-            options: 0
-        )
-        try data.write(to: plistURL, options: .atomic)
-        return plistURL
-    }
-
-    static func uninstall() throws -> URL {
-        let libraryDirectory = try FileManager.default.url(
-            for: .libraryDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: false
-        )
-        let plistURL = libraryDirectory
-            .appendingPathComponent("LaunchAgents", isDirectory: true)
-            .appendingPathComponent(plistName)
-        if FileManager.default.fileExists(atPath: plistURL.path) {
-            try FileManager.default.removeItem(at: plistURL)
-        }
-        return plistURL
     }
 }
 
@@ -316,11 +350,12 @@ private final class BootController: NSObject, NSWindowDelegate {
             catch { stopForFailure(error) }
             return
         }
-        do { try TrustedApplication.validateApplication(at: appURL) }
+        let launchURL: URL
+        do { launchURL = try TrustedApplication.validatedLaunchURL(at: appURL) }
         catch { stopForFailure(error); return }
         let openConfiguration = NSWorkspace.OpenConfiguration()
         openConfiguration.activates = false
-        NSWorkspace.shared.openApplication(at: appURL, configuration: openConfiguration) { [weak self] app, error in
+        NSWorkspace.shared.openApplication(at: launchURL, configuration: openConfiguration) { [weak self] app, error in
             Task { @MainActor in
                 guard let self, !self.handedOff else { return }
                 if let error {
@@ -475,11 +510,11 @@ private final class BootController: NSObject, NSWindowDelegate {
                 onFinish?()
                 return
             }
-            try TrustedApplication.validateApplication(at: appURL)
+            let launchURL = try TrustedApplication.validatedLaunchURL(at: appURL)
             closeOverlay()
             let openConfiguration = NSWorkspace.OpenConfiguration()
             openConfiguration.activates = false
-            NSWorkspace.shared.openApplication(at: appURL, configuration: openConfiguration) { app, error in
+            NSWorkspace.shared.openApplication(at: launchURL, configuration: openConfiguration) { app, error in
                 Task { @MainActor in
                     do {
                         if let error { throw error }
@@ -513,14 +548,12 @@ private final class BootController: NSObject, NSWindowDelegate {
             guard fileManager.fileExists(atPath: url.path) else {
                 throw LauncherError.missingApp("AppPath 不存在：\(url.path)")
             }
-            try TrustedApplication.validateApplication(at: url)
-            return (url, bundleIdentifier)
+            return (try TrustedApplication.validatedLaunchURL(at: url), bundleIdentifier)
         }
 
         if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier),
            fileManager.fileExists(atPath: url.path) {
-            try TrustedApplication.validateApplication(at: url)
-            return (url, bundleIdentifier)
+            return (try TrustedApplication.validatedLaunchURL(at: url), bundleIdentifier)
         }
         throw LauncherError.missingApp("未通过 Bundle Identifier 找到应用：\(bundleIdentifier)")
     }
@@ -725,26 +758,13 @@ private func exampleConfigurationURL() -> URL? {
 private struct DragonCodexBootMacApp {
     static func main() {
         if CommandLine.arguments.contains("--install-integration") {
-            do {
-                let executablePath = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.path
-                let plistURL = try LaunchAgentIntegration.install(executablePath: executablePath)
-                print("Codex launch monitor manifest written: \(plistURL.path)")
-                exit(0)
-            } catch {
-                fputs("Could not write the Codex launch monitor manifest: \(error.localizedDescription)\n", stderr)
-                exit(1)
-            }
+            fputs("此入口不再安装登录监视器。请运行 scripts/install-codex-integration.sh。\n", stderr)
+            exit(1)
         }
 
         if CommandLine.arguments.contains("--uninstall-integration") {
-            do {
-                let plistURL = try LaunchAgentIntegration.uninstall()
-                print("Codex launch monitor manifest removed: \(plistURL.path)")
-                exit(0)
-            } catch {
-                fputs("Could not remove the Codex launch monitor: \(error.localizedDescription)\n", stderr)
-                exit(1)
-            }
+            fputs("此入口不再卸载登录监视器。请运行 scripts/uninstall-codex-integration.sh。\n", stderr)
+            exit(1)
         }
 
         if CommandLine.arguments.contains("--self-test") {
@@ -761,14 +781,7 @@ private struct DragonCodexBootMacApp {
                         throw LauncherConfigurationError("播放器淡出曲线检查失败。")
                     }
                 }
-                let agentManifest = LaunchAgentIntegration.propertyList(
-                    executablePath: "/Applications/DragonCodexBoot.app/Contents/MacOS/DragonCodexBootMac"
-                )
-                guard (agentManifest["ProgramArguments"] as? [String])?.last == "--watch" else {
-                    throw LauncherConfigurationError("登录监视器启动参数检查失败。")
-                }
-                _ = try PropertyListSerialization.data(fromPropertyList: agentManifest, format: .xml, options: 0)
-                print("macOS launcher configuration, fade, and launch monitor checks passed: \(url.path)")
+                print("macOS launcher configuration and fade checks passed: \(url.path)")
                 exit(0)
             } catch {
                 fputs("macOS launcher self-test failed: \(error.localizedDescription)\n", stderr)

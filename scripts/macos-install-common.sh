@@ -1,38 +1,24 @@
 #!/usr/bin/env bash
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/macos-path-safety.sh"
+
 macos_install_fail() {
   printf '%s\n' "$*" >&2
   return 1
 }
 
 macos_check_directory_chain() {
-  local path="$1" current="/" component
-  case "$path" in
-    /*) ;;
-    *) macos_install_fail "Expected an absolute path: $path"; return 1 ;;
-  esac
-  case "$path/" in
-    *//*|*/./*|*/../*) macos_install_fail "Refusing a non-normalized path: $path"; return 1 ;;
-  esac
-  local remaining="${path#/}"
-  while [[ -n "$remaining" ]]; do
-    component="${remaining%%/*}"
-    current="${current%/}/$component"
-    if [[ -L "$current" || ( -e "$current" && ! -d "$current" ) ]]; then
-      macos_install_fail "Refusing a symlink or non-directory: $current"; return 1
-    fi
-    [[ "$remaining" == */* ]] || break
-    remaining="${remaining#*/}"
-  done
+  macos_assert_safe_directory_chain "$1"
 }
 
 macos_check_regular_file() {
-  [[ ! -L "$1" && -f "$1" ]] || macos_install_fail "Refusing a symlink or non-file: $1"
+  macos_assert_safe_regular_file "$1"
 }
 
 macos_check_integration_app() {
   local app="$1" plist="$1/Contents/Info.plist"
   macos_check_directory_chain "$app/Contents/MacOS" || return 1
+  macos_check_directory_chain "$app/Contents/Resources" || return 1
   [[ -d "$app" ]] || { macos_install_fail "Expected an application directory: $app"; return 1; }
   macos_check_regular_file "$plist" || return 1
   macos_check_regular_file "$app/Contents/MacOS/DragonCodexBootMac" || return 1
