@@ -1,3 +1,21 @@
+// The unchecked conformance is backed by locking every read and write of storage.
+private final class ConcurrentFailures: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+
+    func append(_ message: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        storage.append(message)
+    }
+
+    func snapshot() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+}
+
 @main
 @MainActor
 private struct SecurityEntrypointTests {
@@ -163,19 +181,17 @@ private struct SecurityEntrypointTests {
         let expectedDisplayName = largeConfiguration.displayName
         try JSONEncoder().encode(largeConfiguration).write(to: template)
         let concurrentRoot = testRoot.appendingPathComponent("concurrent-support")
-        let lock = NSLock()
-        var failures: [String] = []
+        let failures = ConcurrentFailures()
         DispatchQueue.concurrentPerform(iterations: 8) { _ in
             do {
                 let runtime = try RuntimeConfiguration.load(supportRoot: concurrentRoot, resourceRoot: resources)
                 guard runtime.configuration.displayName == expectedDisplayName else { throw POSIXError(.EIO) }
             } catch {
-                lock.lock()
                 failures.append(error.localizedDescription)
-                lock.unlock()
             }
         }
-        check(failures.isEmpty, "concurrent first launches only observe a complete configuration: \(failures)")
+        let failureMessages = failures.snapshot()
+        check(failureMessages.isEmpty, "concurrent first launches only observe a complete configuration: \(failureMessages)")
         check(try Data(contentsOf: concurrentRoot.appendingPathComponent("media/startup.mp4")) == originalVideo, "concurrent first launches preserve the complete video")
         check(try !files.contentsOfDirectory(atPath: concurrentRoot.path).contains { $0.hasPrefix(".dragon-copy-") }, "completed copies remove their private staging files")
     }

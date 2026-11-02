@@ -4,7 +4,12 @@ $repoRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $outputRoot=Join-Path $repoRoot 'build/DragonCodexBoot'
 $exe=Join-Path $outputRoot 'DragonCodexBoot.exe'
 $process=Start-Process -FilePath $exe -ArgumentList '--self-test' -WindowStyle Hidden -Wait -PassThru
-if ($process.ExitCode -ne 0) { throw 'Launcher self-test failed. See build/DragonCodexBoot/self-test-error.txt.' }
+if ($process.ExitCode -ne 0) {
+    $selfTestError=Join-Path $outputRoot 'self-test-error.txt'
+    if (Test-Path -LiteralPath $selfTestError -PathType Leaf) { Get-Content -LiteralPath $selfTestError -Encoding UTF8 -Raw }
+    else { Write-Output ('Self-test exited with code '+$process.ExitCode+' without an error file.') }
+    throw 'Launcher self-test failed. See build/DragonCodexBoot/self-test-error.txt.'
+}
 $framework=Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319'
 $argsList=@('/nologo','/target:exe','/platform:x64',('/out:'+(Join-Path $outputRoot 'GeometryTests.exe')),('/reference:'+$exe),'/reference:System.Web.Extensions.dll',('/reference:'+(Join-Path $framework 'WPF/PresentationFramework.dll')),('/reference:'+(Join-Path $framework 'WPF/WindowsBase.dll')),(Join-Path $repoRoot 'tests/GeometryTests.cs'))
 & (Join-Path $framework 'csc.exe') @argsList
