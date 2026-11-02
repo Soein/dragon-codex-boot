@@ -51,17 +51,16 @@ final class Launcher: NSObject, NSApplicationDelegate {
         try? FileManager.default.createDirectory(at: diagnosticURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? Data().write(to: diagnosticURL, options: .atomic)
         report("START")
-        targetURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: targetID)
+        guard let discoveredURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: targetID) else {
+            fail("没有找到 Codex（应用标识 com.openai.codex）。请先安装 Codex 桌面客户端。")
+            return
+        }
+        do { targetURL = try TrustedApplication.validatedLaunchURL(at: discoveredURL) }
+        catch { fail(error.localizedDescription); return }
         guard let url = Bundle.main.url(forResource: "startup", withExtension: "mp4") else {
             fail("缺少启动视频 startup.mp4，请重新安装完整的启动器。")
             return
         }
-        guard targetURL != nil else {
-            fail("没有找到 Codex（应用标识 com.openai.codex）。请先安装 Codex 桌面客户端。")
-            return
-        }
-        do { try TrustedApplication.validateApplication(at: targetURL!) }
-        catch { fail(error.localizedDescription); return }
         if verification {
             Task { @MainActor in
                 do {
@@ -171,12 +170,13 @@ final class Launcher: NSObject, NSApplicationDelegate {
 
     func launchTarget() {
         guard let targetURL else { fail("没有找到官方 Codex。"); return }
-        do { try TrustedApplication.validateApplication(at: targetURL) }
+        let launchURL: URL
+        do { launchURL = try TrustedApplication.validatedLaunchURL(at: targetURL) }
         catch { fail(error.localizedDescription); return }
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = false
         configuration.createsNewApplicationInstance = false
-        NSWorkspace.shared.openApplication(at: targetURL, configuration: configuration) { [weak self] application, error in
+        NSWorkspace.shared.openApplication(at: launchURL, configuration: configuration) { [weak self] application, error in
             DispatchQueue.main.async {
                 guard let self = self, !self.finishing else { return }
                 if let error {

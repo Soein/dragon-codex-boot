@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repo_root/scripts/macos-install-common.sh"
 macos_integration_paths "$@"
+umask 077
 source_app="$repo_root/build/DragonCodexBoot.app"
 
 # Validate destinations before building or changing the running LaunchAgent.
@@ -12,6 +13,7 @@ macos_check_integration_app "$source_app"
 codesign --verify --deep --strict "$source_app"
 macos_check_integration_paths
 mkdir -p "$install_root" "$agent_directory"
+macos_check_integration_paths
 stage=
 plist_stage=
 had_app=0

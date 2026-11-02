@@ -10,7 +10,7 @@ temp_dir="$(mktemp -d)"
 trap 'rm -rf "$temp_dir"' EXIT
 
 xcrun swiftc -swift-version 5 -target "$(uname -m)-apple-macosx13.0" \
-  -module-cache-path "$repo_root/build/macos/module-cache" \
+  -module-cache-path "$temp_dir/module-cache" \
   "$repo_root/src/macos/PlaybackProgressWatchdog.swift" \
   "$repo_root/tests/macos-watchdog/main.swift" -o "$temp_dir/watchdog-tests"
 "$temp_dir/watchdog-tests"

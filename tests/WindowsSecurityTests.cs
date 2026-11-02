@@ -10,6 +10,10 @@ using DragonCodexBoot;
 internal static class WindowsSecurityTests {
  private static int checks;
  private static void Check(bool value,string message) { if(!value)throw new Exception(message);checks++; }
+ private static void RejectMedia(Action operation,string message) {
+  bool rejected=false;try { operation(); } catch(ArgumentException) { rejected=true; }
+  Check(rejected,message);
+ }
  [DllImport("shell32.dll",CharSet=CharSet.Unicode)] private static extern int SetCurrentProcessExplicitAppUserModelID(string value);
  [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr window,uint message,IntPtr w,IntPtr l);
  private static void Wait(Func<bool> condition,string message) {
@@ -148,6 +152,44 @@ internal static class WindowsSecurityTests {
    Environment.CurrentDirectory=cwd;Environment.SetEnvironmentVariable("PATH",path);Environment.SetEnvironmentVariable("WINDIR",windir);Environment.SetEnvironmentVariable("SystemRoot",systemRoot);
   }
  }
+ private static void MediaChecks(string repository,string fixture) {
+  string[] remoteReferences=new string[] {@"\\media.invalid\share\clip.mp4","//media.invalid/share/clip.mp4",@"\\?\UNC\media.invalid\share\clip.mp4",@"\\.\UNC\media.invalid\share\clip.mp4",@"\??\UNC\media.invalid\share\clip.mp4",@"\\?\GLOBALROOT\Device\Mup\media.invalid\share\clip.mp4","file://media.invalid/share/clip.mp4","https://media.invalid/clip.mp4",@"\clip.mp4",@"Z:clip.mp4",@"C:\clip.mp4:stream",@"C:\NUL.mp4",@"C:\trailing.\clip.mp4"};
+  foreach(string reference in remoteReferences)RejectMedia(delegate { LocalMediaPath.ValidateReference(reference); },"Remote, namespace, stream and DOS-device video aliases must be rejected lexically.");
+  Check(LocalMediaPath.ResolveReference(@"C:\base",@"Z:\SHORT~1\clip.mp4")==@"Z:\SHORT~1\clip.mp4","Path normalization must be purely lexical before a mapped drive is classified.");
+  RejectMedia(delegate { LocalMediaPath.ResolveReference("relative-base","clip.mp4"); },"An invalid base directory must not recurse or probe a drive.");
+  foreach(string device in new string[] {@"\Device\Mup\media.invalid\share",@"\Device\LanmanRedirector\;Z:0000\media.invalid\share",@"\Device\WebDavRedirector\media.invalid",@"\??\UNC\media.invalid\share",@"\??\C:\local-subst"})
+   Check(!LocalMediaPath.IsLocalDevice(device),"Network mappings and DOS aliases must be rejected without opening the mapped path.");
+  Check(LocalMediaPath.IsLocalDevice(@"\Device\HarddiskVolume123")&&LocalMediaPath.IsLocalDevice(@"\Device\CdRom0"),"Physical local media devices remain supported.");
+  foreach(uint attributes in new uint[] {0x400,0x1000,0x40000,0x400000})Check(!LocalMediaPath.SafeAttributes(attributes),"Reparse, offline and recall attributes must be rejected before media data access.");
+  string mediaRoot=Path.Combine(fixture,"media-paths");Directory.CreateDirectory(mediaRoot);
+  string local=Path.Combine(mediaRoot,"literal %2e%2e #\u4f60\u597d.mp4");File.WriteAllBytes(local,new byte[] {1,2,3,4});
+  using(LocalMediaFile file=LocalMediaPath.OpenFile(mediaRoot,Path.GetFileName(local))) {
+   Check(file.Exists&&String.Equals(file.Path,local,StringComparison.OrdinalIgnoreCase),"A normal local relative video must open.");
+   Check(String.Equals(file.MediaUri.LocalPath,local,StringComparison.OrdinalIgnoreCase)&&file.MediaUri.AbsoluteUri.Contains("%252e")&&file.MediaUri.AbsoluteUri.Contains("%23"),"Playback must preserve literal percent/hash filenames instead of decoding path aliases.");
+   using(FileStream stream=file.Stream(false))Check(stream.ReadByte()==1,"Read media through the verified file handle.");
+   bool locked=false;try { Directory.Move(mediaRoot,mediaRoot+"-moved"); } catch(IOException) { locked=true; }
+   Check(locked,"Verified parent directories must remain protected from path replacement while media is in use.");
+  }
+  Directory.Move(mediaRoot,mediaRoot+"-moved");Directory.Move(mediaRoot+"-moved",mediaRoot);
+  Check(true,"Disposing media validation must release its directory handles.");
+  using(LocalMediaFile file=LocalMediaPath.OpenFile(mediaRoot,local))Check(file.Exists,"A normal local absolute video must open.");
+  using(LocalMediaFile file=LocalMediaPath.OpenFile(mediaRoot,"missing/video.mp4"))Check(!file.Exists,"Missing local media remains reportable without contacting a remote path.");
+  Config config=new JavaScriptSerializer().Deserialize<Config>(File.ReadAllText(Path.Combine(repository,"config","launcher.example.json")));
+  foreach(string reference in remoteReferences) {
+   config.Video=reference;
+   RejectMedia(delegate { Entry.ValidateConfig(config); },"Upstream configuration validation must reject unsafe video references without opening them.");
+  }
+  string configPath=Path.Combine(mediaRoot,"launcher.json");config.Video=remoteReferences[0];
+  File.WriteAllText(configPath,new JavaScriptSerializer().Serialize(config));
+  RejectMedia(delegate { Entry.ReadConfig(mediaRoot); },"Configuration must reject a remote Video before any existence or playback access.");
+  string link=Path.Combine(fixture,"media-junction");
+  Run(new ProcessStartInfo(Path.Combine(SystemExecutables.DirectoryPath(false),"cmd.exe"),"/d /c mklink /J \""+link+"\" \""+mediaRoot+"\""));
+  RejectMedia(delegate { using(LocalMediaFile file=LocalMediaPath.OpenFile(fixture,Path.Combine(link,Path.GetFileName(local)))) {} },"A local reparse fixture must be rejected before traversing it; no remote junction is created for this test.");
+  config.Video=Path.Combine(link,Path.GetFileName(local));File.WriteAllText(configPath,new JavaScriptSerializer().Serialize(config));
+  RejectMedia(delegate { Entry.ReadConfig(mediaRoot); },"Configuration must reject reparse paths before File.Exists or media decoding.");
+  RejectMedia(delegate { Entry.ImportAnimation(remoteReferences[0],mediaRoot,fixture); },"The compiled importer must reject UNC input before inspecting it.");
+  RejectMedia(delegate { Entry.ImportAnimation(local,remoteReferences[0],fixture); },"The importer must reject a remote destination before accessing its configuration or media.");
+ }
  [STAThread] public static int Main(string[] args) {
   try {
    string executable=Process.GetCurrentProcess().MainModule.FileName;
@@ -160,10 +202,11 @@ internal static class WindowsSecurityTests {
    PolicyChecks(fixture);bool metadata;
    ProcessChecks(fixture,executable,args.Length>2?args[2]:null,out metadata);
    ToolChecks(fixture,executable,repository);
+   MediaChecks(repository,fixture);
    Directory.CreateDirectory(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"qa"));
    File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"qa","windows-security-tests.json"),new JavaScriptSerializer().Serialize(new {
     ok=true,checks=checks,realUnpackagedProcessChecked=true,unrelatedPackageMetadataChecked=metadata,
-    officialStoreWindowChecked=false,scope="Pure trust policy, real isolated unpackaged windows and harmless system-tool execution. No Codex activation or media playback."
+    officialStoreWindowChecked=false,localMediaPathsChecked=true,remoteMappingsCreated=false,remotePathTestsUseLexicalPolicy=true,scope="Pure trust/path policy, real isolated unpackaged windows and harmless system-tool/local file execution. No Codex activation, media playback or remote mapping is performed."
    }));
    Console.WriteLine("PASS: "+checks+" Windows identity and system-tool assertions; official Store window positive case remains untested.");return 0;
   } catch(Exception e) { Console.Error.WriteLine(e);return 1; }

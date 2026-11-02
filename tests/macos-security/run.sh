@@ -43,7 +43,7 @@ xcrun swiftc -swift-version 5 -parse-as-library -module-cache-path "$test_root/m
   "$repo_root/macos/Sources/DragonCodexBootCore/LauncherConfiguration.swift" \
   "$repo_root/macos/Sources/DragonCodexBootCore/TrustedApplication.swift" \
   "$test_root/EntrypointTests.swift" -o "$test_root/entrypoint-tests"
-"$test_root/entrypoint-tests" "$fixture" "$fixture_pid"
+"$test_root/entrypoint-tests" "$fixture" "$fixture_pid" "$test_root"
 
 awk '/^let application = NSApplication.shared$/ { exit } { print }' "$repo_root/src/macos/main.swift" > "$test_root/StandaloneTests.swift"
 cat "$repo_root/tests/macos-security/StandaloneTests.swift" >> "$test_root/StandaloneTests.swift"
@@ -61,3 +61,34 @@ if [[ "$status" -ne 1 ]]; then
   exit 1
 fi
 echo "PASS: standalone final handoff stops before untrusted activation"
+
+printf 'ordinary file fixture\n' > "$test_root/not-an-application"
+set +e
+TMPDIR="$test_root/" "$test_root/standalone-tests" "$fixture_pid" "$test_root/not-an-application" --verify --launch-rejection > "$test_root/standalone-launch.log" 2>&1
+status=$?
+set -e
+cat "$test_root/standalone-launch.log"
+if [[ "$status" -ne 1 ]]; then
+  echo "FAIL: standalone launch rejection exited $status instead of 1" >&2
+  exit 1
+fi
+echo "PASS: standalone launch rejects an ordinary file before Launch Services"
+
+xcrun swiftc -swift-version 5 -parse-as-library -module-cache-path "$test_root/module-cache" \
+  "$repo_root/macos/Sources/DragonCodexBootCore/LauncherConfiguration.swift" \
+  "$repo_root/macos/Sources/DragonCodexBootCore/TrustedApplication.swift" \
+  "$repo_root/macos/Sources/DragonCodexBootMac/main.swift" -o "$test_root/integration-cli-tests"
+# Deny writes even if obsolete LaunchAgent logic is accidentally restored later.
+for action in install uninstall; do
+  set +e
+  /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny file-write*)' \
+    "$test_root/integration-cli-tests" "--$action-integration" > "$test_root/cli-$action.log" 2>&1
+  status=$?
+  set -e
+  cat "$test_root/cli-$action.log"
+  if [[ "$status" -ne 1 ]] || ! grep -Fq "scripts/$action-codex-integration.sh" "$test_root/cli-$action.log"; then
+    echo "FAIL: obsolete $action CLI must fail and name the maintained script" >&2
+    exit 1
+  fi
+done
+echo "PASS: obsolete integration CLI rejects both actions with all file writes denied"

@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Real filesystem, bundle metadata and codesign checks; launchctl/build stay in /private/tmp.
+# Mutations stay in /private/tmp; system ancestors are inspected read-only and launchctl/build are isolated.
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 scratch="$(mktemp -d /private/tmp/dragon-macos-install.XXXXXX)"
-trap 'rm -rf "$scratch"' EXIT
+clear_fixture_acls() {
+  find "$scratch" ! -type l -exec chmod -N {} +
+}
+trap 'chmod 700 "$scratch"; clear_fixture_acls; rm -rf "$scratch"' EXIT
 fixture="$scratch/repo"
 mkdir -p "$fixture/scripts" "$fixture/build" "$scratch/bin"
 cp "$repo_root/scripts/"*macos*.sh "$repo_root/scripts/"*codex-integration.sh "$fixture/scripts/"
@@ -34,6 +37,8 @@ make_app() {
   /usr/bin/plutil -insert CFBundlePackageType -string APPL "$app/Contents/Info.plist"
 }
 reset_user() {
+  chmod 700 "$scratch"
+  clear_fixture_acls
   rm -rf "$scratch/user" "$scratch/other" "$fixture/build/DragonCodexBoot.app"
   mkdir -p "$scratch/user/Applications" "$scratch/user/Library/LaunchAgents" "$scratch/other"
   : > "$MACOS_TEST_EVENTS"
@@ -51,7 +56,7 @@ reject_before_side_effects() {
 
 make_app "$MACOS_TEST_SOURCE"
 codesign --force --sign - --timestamp=none "$MACOS_TEST_SOURCE" >/dev/null 2>&1
-for case_name in app-symlink dangling-app applications-symlink applications-file library-symlink agents-symlink agents-file app-file wrong-app contents-symlink macos-symlink plist-symlink executable-symlink agent-symlink agent-directory user-symlink; do
+for case_name in app-symlink dangling-app applications-symlink applications-file library-symlink agents-symlink agents-file app-file wrong-app contents-symlink macos-symlink plist-symlink executable-symlink agent-symlink agent-directory user-symlink ancestor-writable user-writable group-writable applications-writable library-writable agents-writable app-writable contents-writable macos-writable resources-writable plist-writable executable-writable agent-writable ancestor-acl agents-acl app-acl plist-acl executable-acl agent-acl inherited-acl; do
   reset_user
   app="$scratch/user/Applications/DragonCodexBoot.app"
   agent="$scratch/user/Library/LaunchAgents/community.dragoncodexboot.codex-watcher.plist"
@@ -72,10 +77,60 @@ for case_name in app-symlink dangling-app applications-symlink applications-file
     agent-symlink) ln -s "$scratch/other/agent.plist" "$agent" ;;
     agent-directory) mkdir "$agent" ;;
     user-symlink) mv "$scratch/user" "$scratch/other/user"; ln -s "$scratch/other/user" "$scratch/user" ;;
+    ancestor-writable) chmod 777 "$scratch" ;;
+    user-writable) chmod 777 "$scratch/user" ;;
+    group-writable)
+      ordinary_group="$(id -G | /usr/bin/awk '{for(i=1;i<=NF;i++) if($i!=0 && $i!=80) {print $i;exit}}')"
+      [[ -n "$ordinary_group" ]] || continue
+      chgrp "$ordinary_group" "$scratch/user"; chmod 770 "$scratch/user" ;;
+    applications-writable) chmod 777 "$scratch/user/Applications" ;;
+    library-writable) chmod 777 "$scratch/user/Library" ;;
+    agents-writable) chmod 777 "$scratch/user/Library/LaunchAgents" ;;
+    app-writable) make_app "$app"; chmod 777 "$app" ;;
+    contents-writable) make_app "$app"; chmod 777 "$app/Contents" ;;
+    macos-writable) make_app "$app"; chmod 777 "$app/Contents/MacOS" ;;
+    resources-writable) make_app "$app"; chmod 777 "$app/Contents/Resources" ;;
+    plist-writable) make_app "$app"; chmod 666 "$app/Contents/Info.plist" ;;
+    executable-writable) make_app "$app"; chmod 777 "$app/Contents/MacOS/DragonCodexBootMac" ;;
+    agent-writable) printf 'unsafe\n' > "$agent"; chmod 666 "$agent" ;;
+    ancestor-acl) chmod +a 'group:everyone allow delete_child' "$scratch/user/Library" ;;
+    agents-acl) chmod +a 'group:everyone allow add_file,delete_child' "$scratch/user/Library/LaunchAgents" ;;
+    app-acl) make_app "$app"; chmod +a 'group:everyone allow writesecurity' "$app" ;;
+    plist-acl) make_app "$app"; chmod +a 'group:everyone allow write' "$app/Contents/Info.plist" ;;
+    executable-acl) make_app "$app"; chmod +a 'group:everyone allow write' "$app/Contents/MacOS/DragonCodexBootMac" ;;
+    agent-acl) printf 'unsafe\n' > "$agent"; chmod +a 'group:everyone allow write' "$agent" ;;
+    inherited-acl) chmod +a 'group:everyone allow write,file_inherit,directory_inherit,only_inherit' "$scratch/user/Library" ;;
   esac
   reject_before_side_effects install-codex-integration.sh
   reject_before_side_effects uninstall-codex-integration.sh
 done
+
+# Standard system permissions and protective/read-only ACLs must remain usable.
+source "$repo_root/scripts/macos-path-safety.sh"
+macos_assert_safe_directory_chain /Applications
+macos_assert_safe_directory_chain "$HOME"
+if macos_assert_safe_directory_chain /private/tmp > "$scratch/output" 2>&1 ||
+   macos_assert_safe_directory_chain "$scratch.missing/child" > "$scratch/output" 2>&1; then
+  printf 'FAIL: sticky system directories must only protect an existing private child\n' >&2; exit 1
+fi
+macos_assert_safe_directory_chain "$scratch/missing/child"
+reset_user
+chmod +a 'group:everyone deny delete' "$scratch/user"
+chmod +a 'group:everyone allow list,search,readattr,readsecurity' "$scratch/user/Library/LaunchAgents"
+chmod +a "user:$(id -un) allow add_file,delete_child" "$scratch/user/Applications"
+macos_assert_safe_directory_chain "$scratch/user/Applications"
+macos_assert_safe_directory_chain "$scratch/user/Library/LaunchAgents"
+macos_assert_safe_directory_chain "$scratch/user/Library/LaunchAgents/missing/child"
+chmod -RN "$scratch/user"
+
+# Newly created destinations remain private even when the caller uses a permissive umask.
+rm -rf "$scratch/user/Applications" "$scratch/user/Library"
+(umask 000; bash "$fixture/scripts/install-codex-integration.sh" --user-root "$scratch/user")
+for directory in "$scratch/user/Applications" "$scratch/user/Library" "$scratch/user/Library/LaunchAgents"; do
+  test "$(/usr/bin/stat -f %Lp "$directory")" = 700
+done
+test "$(/usr/bin/stat -f %Lp "$scratch/user/Library/LaunchAgents/community.dragoncodexboot.codex-watcher.plist")" = 600
+bash "$fixture/scripts/uninstall-codex-integration.sh" --user-root "$scratch/user"
 
 reset_user
 app="$scratch/user/Applications/DragonCodexBoot.app"

@@ -5,8 +5,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repo_root/scripts/macos-install-common.sh"
 macos_integration_paths "$@"
 
-launchctl bootout "$launch_domain/$agent_label" >/dev/null 2>&1 || true
 macos_check_integration_paths
+launchctl bootout "$launch_domain/$agent_label" >/dev/null 2>&1 || true
 rm -f "$agent_plist"
 if [[ -d "$install_app" ]]; then
   rm -rf "$install_app"

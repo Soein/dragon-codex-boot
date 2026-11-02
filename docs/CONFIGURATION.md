@@ -5,7 +5,7 @@
 | 字段 | 含义 |
 | --- | --- |
 | `DisplayName` | 播放窗口的显示名 |
-| `Video` | 本地 MP4，相对路径以可执行文件目录为基准，也可写绝对路径 |
+| `Video` | 本地磁盘上的 MP4，相对路径以可执行文件目录为基准，也可写完整的本地盘符路径。网络共享、映射网络盘和重解析点会被拒绝 |
 | `AppLaunch` | 受支持官方 Store 包的 `shell:AppsFolder\OpenAI.Codex_2p2nqsd0c76g0!应用ID`；不能改为其他包族 |
 | `ProcessNames` | 客户端候选进程名列表，不带 `.exe`；只作筛选，不证明身份 |
 | `ProcessPathContains` | 候选可执行文件路径中必须出现的字符串；只能收窄候选范围，不能扩大受信包或发布者范围 |

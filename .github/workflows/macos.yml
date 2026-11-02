@@ -21,6 +21,8 @@ jobs:
         run: bash tests/macos-security/run.sh
       - name: Verify isolated installation and removal boundaries
         run: bash scripts/test-macos-install.sh
+      - name: Reject unsafe build inputs and outputs
+        run: bash scripts/test-macos-build-safety.sh
       - name: Verify signature requirements with real signed code
         run: bash scripts/test-macos-signature-requirement.sh
       - name: Verify release failures without contacting Apple

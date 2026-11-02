@@ -20,5 +20,7 @@ $otherPackage=Get-AppxPackage -PackageTypeFilter Main | Where-Object { $_.Packag
 & (Join-Path $outputRoot 'WindowsSecurityTests.exe') $repoRoot $securityFixture $otherPackage.PackageFullName
 if ($LASTEXITCODE -ne 0) { throw 'Windows process identity or system-tool security tests failed.' }
 Get-Content -LiteralPath (Join-Path $outputRoot 'qa/windows-security-tests.json') -Raw
+& (Join-Path $repoRoot 'tests/ImportAnimationTests.ps1')
+Get-Content -LiteralPath (Join-Path $outputRoot 'qa/import-animation-tests.json') -Raw
 & (Join-Path $repoRoot 'tests/EntrypointTests.ps1')
 Get-Content -LiteralPath (Join-Path $outputRoot 'qa/self-test.json') -Raw

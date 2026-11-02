@@ -30,8 +30,8 @@ macOS 版是 `macos/` 下的 Swift 原生启动器，要求 macOS 13 或更新�
 - 它不把真实 Codex 窗口实时裁切到动画里的屏幕矩形。Windows 版对应效果依靠 DWM 缩略图，macOS 没有相同的无权限接口。
 - 启动器不会改写 Dock、Launch Services 或 Codex App。可选监视器只增加当前用户的 LaunchAgent，用户可在系统设置中停用或通过卸载脚本移除。
 - `AppBundleIdentifier` 固定为官方 `com.openai.codex`，留空时采用该值，其他值会被拒绝。`AppPath` 可指定官方 Codex 的自定义安装位置，例如 `/Applications/Codex.app`；它不能切换到其他应用身份。启动及监视交接还会检查 Apple Developer ID 签名、OpenAI Team ID `2DC432GLL2` 和实际进程身份，应用显示名不作为身份依据。
-- 配置位于 `~/Library/Application Support/DragonCodexBoot/`；首次运行会从 App 包复制配置模板。MP4 在该目录下的 `media/startup.mp4`，也可在配置里填绝对路径。启动信息写入 macOS Console。
-- 构建脚本会把 `media/startup.mp4` 和 `media/MEDIA_NOTICE.md` 一并装进 App；首次运行时复制到用户配置目录。
+- 配置位于 `~/Library/Application Support/DragonCodexBoot/`。使用默认配置时，启动器只把内置视频复制到这里的 `media/startup.mp4`。自定义 `Video` 可以填写已有视频的相对或绝对路径，启动器仅从该位置读取。启动信息写入 macOS Console。
+- 官方客户端须安装在启动磁盘的系统卷或数据卷上，例如 `/Applications` 或受保护的 `~/Applications`。从磁盘映像、外置盘或其他账户可写的位置安装时，请先把完整的官方 App 复制到上述目录。启动器按实际物理位置校验并打开客户端。
 
 ## 构建
 
