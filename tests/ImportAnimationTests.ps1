@@ -29,6 +29,16 @@ Check ((Hash $destination) -eq (Hash $source)) 'Relative local MP4 input must re
 $mediaBackups=@(Get-ChildItem -LiteralPath (Join-Path $appRoot 'media') -Filter 'startup-backup-*.mp4')
 Check ($mediaBackups.Count -eq 1 -and (Hash $mediaBackups[0].FullName) -eq $beforeVideo) 'Replacing media must keep a verified backup.'
 $beforeVideo=Hash $destination;$beforeConfig=Hash $configPath
+$configBackupCount=@(Get-ChildItem -LiteralPath $appRoot -Filter 'launcher.json.backup-*').Count
+$mediaBackupCount=$mediaBackups.Count
+$heldLock=[IO.File]::Open((Join-Path $appRoot '.dragon-media-import.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+$conflict=$false
+try { $null=& $import -VideoPath $source -AppRoot $appRoot }
+catch { $conflict=$_.Exception.ToString() -match 'Win32 32:' }
+finally { $heldLock.Dispose() }
+Check ($conflict -and (Hash $destination) -eq $beforeVideo -and (Hash $configPath) -eq $beforeConfig) 'An active import lock must reject a competing import without changing media or configuration.'
+Check (@(Get-ChildItem -LiteralPath $appRoot -Filter 'launcher.json.backup-*').Count -eq $configBackupCount -and @(Get-ChildItem -LiteralPath (Join-Path $appRoot 'media') -Filter 'startup-backup-*.mp4').Count -eq $mediaBackupCount) 'A rejected concurrent import must not create backups before acquiring its lock.'
+$beforeVideo=Hash $destination;$beforeConfig=Hash $configPath
 [IO.File]::WriteAllBytes($source,[byte[]]@(9,10,11,12))
 [IO.File]::SetAttributes($configPath,[IO.FileAttributes]::ReadOnly)
 $rejected=$false

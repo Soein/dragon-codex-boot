@@ -8,6 +8,46 @@ if ($process.ExitCode -ne 0) {
     $selfTestError=Join-Path $outputRoot 'self-test-error.txt'
     if (Test-Path -LiteralPath $selfTestError -PathType Leaf) { Get-Content -LiteralPath $selfTestError -Encoding UTF8 -Raw }
     else { Write-Output ('Self-test exited with code '+$process.ExitCode+' without an error file.') }
+    # Probe only the existing local test configuration while retaining the production metadata guard.
+    $mediaGuard=$null
+    try {
+        $assembly=[Reflection.Assembly]::LoadFrom($exe)
+        $policy=$assembly.GetType('DragonCodexBoot.LocalMediaPath',$true)
+        $staticFlags=[Reflection.BindingFlags]'Static,NonPublic'
+        $instanceFlags=[Reflection.BindingFlags]'Instance,NonPublic'
+        $mediaGuard=$policy.GetMethod('OpenFile',$staticFlags).Invoke($null,@($outputRoot,'launcher.json'))
+        $probePath=$mediaGuard.GetType().GetField('Path',$instanceFlags).GetValue($mediaGuard)
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class LocalReOpenProbe {
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
+ private static extern SafeFileHandle CreateFile(string path,uint access,uint share,IntPtr security,uint creation,uint flags,IntPtr template);
+ [DllImport("kernel32.dll",SetLastError=true)]
+ private static extern SafeFileHandle ReOpenFile(SafeFileHandle file,uint access,uint share,uint flags);
+ public static string Run(string path,uint originalAccess,uint flags) {
+  using(SafeFileHandle original=CreateFile(path,originalAccess,1,IntPtr.Zero,3,0x02300000,IntPtr.Zero)) {
+   if(original.IsInvalid) {
+    int error=Marshal.GetLastWin32Error();
+    return String.Format("REOPEN PROBE originalAccess=0x{0:X}: CreateFile Win32 {1}: {2}",originalAccess,error,new Win32Exception(error).Message);
+   }
+   using(SafeFileHandle reopened=ReOpenFile(original,0x80000000,1,flags)) {
+    int error=reopened.IsInvalid?Marshal.GetLastWin32Error():0;
+    return String.Format("REOPEN PROBE originalAccess=0x{0:X}, flags=0x{1:X}: Win32 {2}: {3}",originalAccess,flags,error,new Win32Exception(error).Message);
+   }
+  }
+ }
+}
+'@
+        foreach ($originalAccess in @([uint32]128,[uint32]2147483648)) {
+            foreach ($flags in @([uint32]0,[uint32]0x00200000,[uint32]0x00100000,[uint32]0x00300000)) {
+                [LocalReOpenProbe]::Run($probePath,$originalAccess,$flags)
+            }
+        }
+    } catch { Write-Output ('Local ReOpen diagnostic failed: '+$_.Exception.ToString()) }
+    finally { if ($mediaGuard) { ([IDisposable]$mediaGuard).Dispose() } }
     throw 'Launcher self-test failed. See build/DragonCodexBoot/self-test-error.txt.'
 }
 $framework=Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319'

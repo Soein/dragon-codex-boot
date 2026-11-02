@@ -125,6 +125,18 @@ namespace DragonCodexBoot {
   internal static LocalMediaFile OpenFile(string root,string reference) { return Walk(root,reference,false,false); }
   internal static LocalMediaFile OpenDirectory(string root,string reference) { return Walk(root,reference,true,false); }
   internal static void EnsureDirectory(string root,string reference) { using(LocalMediaFile folder=Walk(root,reference,true,true)) {} }
+  internal static SafeFileHandle AcquireImportLock(LocalMediaFile root) {
+   if(!root.Exists||root.Handle==null)throw new DirectoryNotFoundException("Local installation directory missing.");
+   CheckHandle(root.Handle,true);
+   string path=ResolveReference(root.Path,".dragon-media-import.lock");
+   using(LocalMediaFile existing=OpenFile(root.Path,path)) {}
+   SafeFileHandle handle=CreateFile(path,0xC0000000,0,IntPtr.Zero,4,MetadataFlags,IntPtr.Zero);
+   if(handle.IsInvalid) {
+    int error=Marshal.GetLastWin32Error();handle.Dispose();
+    throw NativeErrors.Create(error,"Another media import is active or the local import lock is unavailable.");
+   }
+   try { CheckHandle(handle,false);return handle; } catch { handle.Dispose();throw; }
+  }
   internal static Uri FileUri(string path) {
    string full=ResolveReference(null,path);
    string[] parts=full.Substring(3).Split('\\');

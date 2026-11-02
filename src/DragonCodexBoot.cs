@@ -394,6 +394,7 @@ namespace DragonCodexBoot {
    using(LocalMediaFile video=LocalMediaPath.OpenFile(currentDirectory,source)) {
     if(!root.Exists||!executable.Exists)throw new FileNotFoundException("Build or extract the launcher first.");
     if(!video.Exists)throw new FileNotFoundException("Local MP4 missing.",source);
+    using(IDisposable importLock=LocalMediaPath.AcquireImportLock(root)) {
     JavaScriptSerializer serializer=new JavaScriptSerializer();
     Dictionary<string,object> config=serializer.Deserialize<Dictionary<string,object>>(LocalMediaPath.ReadAllText(destinationRoot,"launcher.json"));
     if(config==null)throw new ArgumentException("Launcher configuration missing.");
@@ -421,6 +422,7 @@ namespace DragonCodexBoot {
      throw;
     }
     return destination;
+    }
    }
   }
   private static bool Finite(double n) { return !Double.IsNaN(n)&&!Double.IsInfinity(n); }
