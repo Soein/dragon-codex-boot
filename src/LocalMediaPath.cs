@@ -166,23 +166,23 @@ namespace DragonCodexBoot {
     }
    });
   }
-  private static void Rename(SafeFileHandle file,SafeFileHandle directory,string name) {
-   byte[] text=Encoding.Unicode.GetBytes(name);
-   int offset=(int)Marshal.OffsetOf(typeof(RenameInformation),"FirstCharacter"),size=offset+text.Length;
-   IntPtr buffer=Marshal.AllocHGlobal(size);bool retained=false;
+  private static void Rename(SafeFileHandle file,string destination) {
+   byte[] text=Encoding.Unicode.GetBytes(ResolveReference(null,destination));
+   int offset=(int)Marshal.OffsetOf(typeof(RenameInformation),"FirstCharacter");
+   int size=Marshal.SizeOf(typeof(RenameInformation))+text.Length+sizeof(char);
+   IntPtr buffer=Marshal.AllocHGlobal(size);
    try {
-    directory.DangerousAddRef(ref retained);
     for(int index=0;index<size;index++)Marshal.WriteByte(buffer,index,0);
     Marshal.WriteInt32(buffer,1);
-    Marshal.WriteIntPtr(buffer,(int)Marshal.OffsetOf(typeof(RenameInformation),"Directory"),directory.DangerousGetHandle());
+    Marshal.WriteIntPtr(buffer,(int)Marshal.OffsetOf(typeof(RenameInformation),"Directory"),IntPtr.Zero);
     Marshal.WriteInt32(buffer,(int)Marshal.OffsetOf(typeof(RenameInformation),"NameLength"),text.Length);
     Marshal.Copy(text,0,IntPtr.Add(buffer,offset),text.Length);
-    if(!SetFileInformationByHandle(file,3,buffer,(uint)size))throw NativeErrors.Create(Marshal.GetLastWin32Error(),"Atomic local file replacement failed.");
-   } finally { if(retained)directory.DangerousRelease();Marshal.FreeHGlobal(buffer); }
+    if(!SetFileInformationByHandle(file,3,buffer,(uint)size))throw NativeErrors.Create(Marshal.GetLastWin32Error(),"Atomic local file replacement failed (RootDirectory=NULL, nameBytes="+text.Length+", bufferSize="+size+").");
+   } finally { Marshal.FreeHGlobal(buffer); }
   }
   private static void AtomicWrite(string root,string reference,Action<FileStream> write) {
    string path=ResolveReference(root,reference);
-   int split=path.LastIndexOf('\\');string parent=path.Substring(0,split+1),name=path.Substring(split+1);
+   int split=path.LastIndexOf('\\');string parent=path.Substring(0,split+1);
    using(LocalMediaFile folder=OpenDirectory(root,parent)) {
     if(!folder.Exists)throw new DirectoryNotFoundException("Local destination directory missing.");
     using(LocalMediaFile destination=OpenFile(root,path)) {}
@@ -191,7 +191,7 @@ namespace DragonCodexBoot {
     if(handle.IsInvalid) { int error=Marshal.GetLastWin32Error();handle.Dispose();throw NativeErrors.Create(error,"Cannot create the local temporary file."); }
     using(LocalMediaFile file=new LocalMediaFile(temporary,true,new List<SafeFileHandle> {handle},handle,true)) {
      bool committed=false;FileStream stream=null;
-     try { stream=file.Stream(true);write(stream);stream.Flush(true);Rename(handle,folder.Handle,name);committed=true; }
+     try { stream=file.Stream(true);write(stream);stream.Flush(true);Rename(handle,path);committed=true; }
      finally {
       if(!committed) {
        IntPtr disposition=Marshal.AllocHGlobal(1);

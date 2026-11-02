@@ -1,7 +1,7 @@
 $ErrorActionPreference='Stop'
 $repoRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $fixture=Join-Path $repoRoot ('.local/import-animation-tests-'+[Guid]::NewGuid().ToString('N'))
-$appRoot=Join-Path $fixture 'local app & spaces!'
+$appRoot=Join-Path $fixture ('local app & spaces! '+[char]0x672c+[char]0x5730)
 New-Item -ItemType Directory -Path $appRoot -Force | Out-Null
 $script:checks=0
 function Check([bool]$Ok,[string]$Message) { if (!$Ok) { throw $Message };$script:checks++ }
