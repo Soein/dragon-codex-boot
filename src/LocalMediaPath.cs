@@ -138,8 +138,14 @@ namespace DragonCodexBoot {
     ObjectAttributes attributes=new ObjectAttributes {Length=(uint)Marshal.SizeOf(typeof(ObjectAttributes)),Directory=parent==null?IntPtr.Zero:parent.DangerousGetHandle(),Name=unicode,Attributes=0x1040}; // OBJ_DONT_REPARSE | OBJ_CASE_INSENSITIVE
     IoStatusBlock io;SafeFileHandle file;
     uint options=NativeNoFollowNoRecall|0x20u|(directory?1u:0x40u); // synchronous, directory/non-directory
-    status=NtCreateFile(out file,access|0x00100000,ref attributes,out io,IntPtr.Zero,directory?0x10u:0x80u,share,creation,options,IntPtr.Zero,0);
-    if(status<0) { if(file!=null)file.Dispose();return null; }
+    uint desiredAccess=access|0x00100000;
+    // FILE_DIRECTORY_FILE specifies directory type; FileAttributes supplies normal creation attributes.
+    status=NtCreateFile(out file,desiredAccess,ref attributes,out io,IntPtr.Zero,0x80,share,creation,options,IntPtr.Zero,0);
+    if(status<0) {
+     if(file!=null)file.Dispose();
+     if(!Missing(status))throw NativeFailure(status,"NtCreateFile(component=\""+name+"\", root="+(parent==null?"physical-device":"verified-parent")+", directory="+directory+", access=0x"+desiredAccess.ToString("X8")+", share=0x"+share.ToString("X")+", disposition="+creation+", options=0x"+options.ToString("X8")+", fileAttributes=0x00000080, objectAttributes=0x1040) failed");
+     return null;
+    }
     try { CheckHandle(file,directory);if(parent!=null)CheckHandle(parent,true);return file; }
     catch { file.Dispose();throw; }
    } finally { if(parentReference)parent.DangerousRelease();if(unicode!=IntPtr.Zero)Marshal.FreeHGlobal(unicode);Marshal.FreeHGlobal(text); }
