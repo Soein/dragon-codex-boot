@@ -11,6 +11,11 @@ using Microsoft.Win32.SafeHandles;
 [assembly: InternalsVisibleTo("WindowsSecurityTests")]
 
 namespace DragonCodexBoot {
+ internal static class NativeErrors {
+  internal static Win32Exception Create(int error,string operation) {
+   return new Win32Exception(error,operation+" [Win32 "+error+": "+new Win32Exception(error).Message+"]");
+  }
+ }
  internal static class SystemExecutables {
   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
   private static extern uint GetSystemWindowsDirectory(StringBuilder path,uint size);
@@ -19,7 +24,7 @@ namespace DragonCodexBoot {
   internal static string DirectoryPath(bool windows) {
    StringBuilder path=new StringBuilder(32768);
    uint length=windows?GetSystemWindowsDirectory(path,(uint)path.Capacity):GetSystemDirectory(path,(uint)path.Capacity);
-   if(length==0||length>=path.Capacity)throw new Win32Exception(Marshal.GetLastWin32Error(),"Cannot resolve the Windows system directory.");
+   if(length==0||length>=path.Capacity)throw NativeErrors.Create(Marshal.GetLastWin32Error(),"Cannot resolve the Windows system directory.");
    return Path.GetFullPath(path.ToString());
   }
   internal static string PowerShellPath { get { return Path.Combine(DirectoryPath(false),"WindowsPowerShell","v1.0","powershell.exe"); } }

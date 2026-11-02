@@ -193,6 +193,7 @@ namespace DragonCodexBoot {
   private readonly MediaElement media;
   private readonly TextBlock status;
   private readonly DispatcherTimer timer;
+  private readonly LocalMediaFile video;
   private readonly Stopwatch wall=new Stopwatch();
   private IntPtr host,thumbnail,stableHandle,alignedHandle;
   private TrustedAppWindow target;
@@ -200,7 +201,10 @@ namespace DragonCodexBoot {
   private double stableSince,lastProbe=-1;
   private bool ready,opened,holding,closing,startedFade,thumbnailFailed;
   private double endedAt=-1;
-  public BootWindow(Config c,string baseDir) {
+  public BootWindow(Config c,string baseDir):this(c,baseDir,LocalMediaPath.OpenFile(baseDir,c.Video)) {}
+  internal BootWindow(Config c,string baseDir,LocalMediaFile localVideo) {
+   if(!localVideo.Exists) { localVideo.Dispose();throw new FileNotFoundException("Local startup video missing."); }
+   video=localVideo;
    cfg=c;root=baseDir;Title=String.IsNullOrWhiteSpace(c.DisplayName)?"Dragon Codex Boot":c.DisplayName;
    WindowStyle=WindowStyle.None;ResizeMode=ResizeMode.NoResize;ShowInTaskbar=false;
    AllowsTransparency=false;Topmost=true;Background=new SolidColorBrush(Color.FromRgb(250,247,253));
@@ -233,7 +237,7 @@ namespace DragonCodexBoot {
    Loaded+=delegate {
     wall.Start();
     if(target==null||!target.IsCurrent) { ClearTarget();LaunchApp(); }
-    media.Source=new Uri(Path.GetFullPath(Path.Combine(root,cfg.Video)));
+    media.Source=video.MediaUri;
     media.Play();timer.Start();Log("started fixed-player="+initialBounds.Width+"x"+initialBounds.Height
      +" at "+initialBounds.Left+","+initialBounds.Top);
    };
@@ -249,7 +253,7 @@ namespace DragonCodexBoot {
    media.MediaEnded+=delegate { endedAt=wall.Elapsed.TotalSeconds;HandOff(); };
    timer=new DispatcherTimer(DispatcherPriority.Render);timer.Interval=TimeSpan.FromMilliseconds(16);
    timer.Tick+=Tick;
-   Closed+=delegate { timer.Stop();media.Stop();ClearTarget(); };
+   Closed+=delegate { timer.Stop();media.Stop();ClearTarget();video.Dispose(); };
   }
   private IntPtr FixedBoundsHook(IntPtr hwnd,int message,IntPtr wParam,IntPtr lParam,ref bool handled) {
    if(message==0x0046&&!closing&&lParam!=IntPtr.Zero) {
@@ -376,9 +380,50 @@ namespace DragonCodexBoot {
    return 0;
   }
   public static Config ReadConfig(string root) {
-   Config c=new JavaScriptSerializer().Deserialize<Config>(File.ReadAllText(Path.Combine(root,"launcher.json")));
+   Config c=new JavaScriptSerializer().Deserialize<Config>(LocalMediaPath.ReadAllText(root,"launcher.json"));
    ValidateConfig(c);
+   using(LocalMediaFile video=LocalMediaPath.OpenFile(root,c.Video)) {}
    return c;
+  }
+  /// <summary>Imports a local MP4 and backs up existing media/configuration. Remote, device and reparse paths are rejected before data access.</summary>
+  public static string ImportAnimation(string sourcePath,string appRoot,string currentDirectory) {
+   string source=LocalMediaPath.ResolveReference(currentDirectory,sourcePath),destinationRoot=LocalMediaPath.ResolveReference(currentDirectory,appRoot);
+   if(!String.Equals(Path.GetExtension(source),".mp4",StringComparison.OrdinalIgnoreCase))throw new ArgumentException("Provide an MP4 file.");
+   using(LocalMediaFile root=LocalMediaPath.OpenDirectory(currentDirectory,destinationRoot))
+   using(LocalMediaFile executable=LocalMediaPath.OpenFile(destinationRoot,"DragonCodexBoot.exe"))
+   using(LocalMediaFile video=LocalMediaPath.OpenFile(currentDirectory,source)) {
+    if(!root.Exists||!executable.Exists)throw new FileNotFoundException("Build or extract the launcher first.");
+    if(!video.Exists)throw new FileNotFoundException("Local MP4 missing.",source);
+    using(IDisposable importLock=LocalMediaPath.AcquireImportLock(root)) {
+    JavaScriptSerializer serializer=new JavaScriptSerializer();
+    Dictionary<string,object> config=serializer.Deserialize<Dictionary<string,object>>(LocalMediaPath.ReadAllText(destinationRoot,"launcher.json"));
+    if(config==null)throw new ArgumentException("Launcher configuration missing.");
+    LocalMediaPath.CopyFile(destinationRoot,"launcher.json","launcher.json.backup-"+Guid.NewGuid().ToString("N"));
+    LocalMediaPath.EnsureDirectory(destinationRoot,"media");
+    string destination=LocalMediaPath.ResolveReference(destinationRoot,"media/startup.mp4");
+    string mediaBackup=null;bool replaced=false;
+    try {
+     if(!String.Equals(source,destination,StringComparison.OrdinalIgnoreCase)) {
+      using(LocalMediaFile previous=LocalMediaPath.OpenFile(destinationRoot,destination)) {
+       if(previous.Exists) {
+        mediaBackup="media/startup-backup-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+"-"+Guid.NewGuid().ToString("N")+".mp4";
+        LocalMediaPath.CopyFile(destinationRoot,destination,mediaBackup);
+       }
+      }
+      LocalMediaPath.CopyFile(destinationRoot,source,destination);replaced=true;
+     }
+     config["Video"]="media/startup.mp4";
+     LocalMediaPath.WriteAllText(destinationRoot,"launcher.json",serializer.Serialize(config));
+    } catch(Exception importError) {
+     if(replaced&&mediaBackup!=null) {
+      try { LocalMediaPath.CopyFile(destinationRoot,mediaBackup,destination); }
+      catch(Exception recoveryError) { throw new AggregateException("Import failed; retain the configuration and media backups for recovery.",importError,recoveryError); }
+     }
+     throw;
+    }
+    return destination;
+    }
+   }
   }
   private static bool Finite(double n) { return !Double.IsNaN(n)&&!Double.IsInfinity(n); }
   public static void ValidateConfig(Config c) {
@@ -391,6 +436,7 @@ namespace DragonCodexBoot {
    if(String.IsNullOrWhiteSpace(c.Video)||String.IsNullOrWhiteSpace(c.ProcessPathContains)
     ||c.ProcessNames.Any(n=>String.IsNullOrWhiteSpace(n)||!System.Text.RegularExpressions.Regex.IsMatch(n,@"^[A-Za-z0-9_.-]+$")))
     throw new ArgumentException("视频路径或进程匹配配置无效。");
+   LocalMediaPath.ValidateReference(c.Video);
    if(!Finite(c.HoldAt)||!Finite(c.TransitionStart)||!Finite(c.TransitionEnd)||!Finite(c.MaxWaitSeconds)||!Finite(c.Volume)
     ||c.Volume<0||c.Volume>1)throw new ArgumentException("时间和音量必须是有限数值，音量范围为0至1。");
    if(c.HoldAt<=0||c.TransitionStart<=c.HoldAt||c.TransitionEnd<=c.TransitionStart||c.MaxWaitSeconds<10)throw new Exception("启动时间配置不正确");
@@ -432,9 +478,9 @@ namespace DragonCodexBoot {
      &&aligned.Width-16==fixedPlayer.Width&&aligned.Height-16==fixedPlayer.Height,"client frame insets");placementCases++;
    }
    Directory.CreateDirectory(Path.Combine(root,"qa"));
-   File.WriteAllText(Path.Combine(root,"qa","self-test.json"),new JavaScriptSerializer().Serialize(new {
+   using(LocalMediaFile video=LocalMediaPath.OpenFile(root,c.Video))File.WriteAllText(Path.Combine(root,"qa","self-test.json"),new JavaScriptSerializer().Serialize(new {
     ok=true,geometryCases=cases,fixedPlacementCases=placementCases,playerWidth=c.PlayerWidth,playerHeight=c.PlayerHeight,
-    videoExists=File.Exists(Path.GetFullPath(Path.Combine(root,c.Video))),nativeUiTested=false,
+    videoExists=video.Exists,nativeUiTested=false,
     scope="Configuration and geometry only. No desktop window or media is opened."
    }));
    return 0;
@@ -450,7 +496,8 @@ namespace DragonCodexBoot {
     bool owns;using(Mutex mutex=new Mutex(true,"Local\\DragonCodexBoot",out owns)) {
      if(!owns)return 0;
      Config c=ReadConfig(root);
-     if(!File.Exists(Path.GetFullPath(Path.Combine(root,c.Video))))throw new Exception("未找到启动视频。请先运行scripts/Import-Animation.ps1导入自己的MP4，或修改launcher.json的Video路径。");
+     using(LocalMediaFile video=LocalMediaPath.OpenFile(root,c.Video)) {
+     if(!video.Exists)throw new Exception("未找到启动视频。请先运行scripts/Import-Animation.ps1导入自己的MP4，或修改launcher.json的Video路径。");
      if(c.AutoReplaceEntrypoints) {
       try { Integrate(root,"Auto",false); }
       catch(Exception e) {
@@ -461,7 +508,8 @@ namespace DragonCodexBoot {
      app.DispatcherUnhandledException+=delegate(object sender,DispatcherUnhandledExceptionEventArgs e) {
       e.Handled=true;MessageBox.Show("启动器已退出："+e.Exception.Message,"Codex启动");app.Shutdown(1);
      };
-     return app.Run(new BootWindow(c,root));
+     return app.Run(new BootWindow(c,root,video));
+     }
     }
    } catch(Exception e) {
     if(args.Contains("--self-test")) { File.WriteAllText(Path.Combine(root,"self-test-error.txt"),e.ToString());return 1; }

@@ -11,7 +11,7 @@ foreach ($name in $files) {
         throw ('Private/generated asset tracked: '+$name)
     }
     $text=Get-Content -LiteralPath (Join-Path $repoRoot $name) -Encoding UTF8 -Raw
-    if ($text -match '[CE]:[/\\]Users[/\\]' -or $text -match '[EF]:[/\\]' -or
+    if ($text -match '(?<![A-Za-z])[CE]:[/\\]Users[/\\]' -or $text -match '(?<![A-Za-z])[EF]:[/\\]' -or
         $text -match 'gh[pousr]_[A-Za-z0-9]{30,}' -or $text -match 'github_pat_[A-Za-z0-9_]{50,}' -or
         $text -match '-----BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY-----') { throw ('Private path or credential marker found: '+$name) }
 }
