@@ -121,6 +121,7 @@ namespace DragonCodexBoot {
    return NativeErrors.Create(unchecked((int)RtlNtStatusToDosError(status)),operation+" [NTSTATUS=0x"+unchecked((uint)status).ToString("X8")+"].");
   }
   private static bool Missing(int status) { return status==unchecked((int)0xC0000034)||status==unchecked((int)0xC000003A); }
+  private static bool NameCollision(int status) { return status==unchecked((int)0xC0000035); }
   // Only the classified physical device root is absolute. Every child open/create is relative
   // to its held parent, so a directory changed into a junction cannot redirect the next open.
   // https://learn.microsoft.com/windows/win32/api/winternl/nf-winternl-ntcreatefile
@@ -137,18 +138,28 @@ namespace DragonCodexBoot {
     if(parent!=null)parent.DangerousAddRef(ref parentReference);
     ObjectAttributes attributes=new ObjectAttributes {Length=(uint)Marshal.SizeOf(typeof(ObjectAttributes)),Directory=parent==null?IntPtr.Zero:parent.DangerousGetHandle(),Name=unicode,Attributes=0x1040}; // OBJ_DONT_REPARSE | OBJ_CASE_INSENSITIVE
     IoStatusBlock io;SafeFileHandle file;
-    uint options=NativeNoFollowNoRecall|0x20u|(directory?1u:0x40u); // synchronous, directory/non-directory
+    // Windows rejects DIRECTORY_FILE with OPEN_NO_RECALL. Only a new directory uses
+    // DIRECTORY_FILE; FILE_CREATE never opens an existing object. Existing types are checked below.
+    uint options=directory&&creation==FileCreate?0x00200021u:NativeNoFollowNoRecall|0x20u;
     uint desiredAccess=access|0x00100000;
     // FILE_DIRECTORY_FILE specifies directory type; FileAttributes supplies normal creation attributes.
     status=NtCreateFile(out file,desiredAccess,ref attributes,out io,IntPtr.Zero,0x80,share,creation,options,IntPtr.Zero,0);
     if(status<0) {
      if(file!=null)file.Dispose();
-     if(!Missing(status))throw NativeFailure(status,"NtCreateFile(component=\""+name+"\", root="+(parent==null?"physical-device":"verified-parent")+", directory="+directory+", access=0x"+desiredAccess.ToString("X8")+", share=0x"+share.ToString("X")+", disposition="+creation+", options=0x"+options.ToString("X8")+", fileAttributes=0x00000080, objectAttributes=0x1040) failed");
+     if(!Missing(status)&&!(directory&&creation==FileCreate&&NameCollision(status)))throw NativeFailure(status,"NtCreateFile(component=\""+name+"\", root="+(parent==null?"physical-device":"verified-parent")+", directory="+directory+", access=0x"+desiredAccess.ToString("X8")+", share=0x"+share.ToString("X")+", disposition="+creation+", options=0x"+options.ToString("X8")+", fileAttributes=0x00000080, objectAttributes=0x1040) failed");
      return null;
     }
     try { CheckHandle(file,directory);if(parent!=null)CheckHandle(parent,true);return file; }
     catch { file.Dispose();throw; }
    } finally { if(parentReference)parent.DangerousRelease();if(unicode!=IntPtr.Zero)Marshal.FreeHGlobal(unicode);Marshal.FreeHGlobal(text); }
+  }
+  private static SafeFileHandle OpenChildDirectory(SafeFileHandle parent,string name,bool create) {
+   int status;SafeFileHandle directory=NativeOpen(parent,name,true,0xA0,3,FileOpen,out status);
+   if(directory!=null||!create)return directory;
+   directory=NativeOpen(parent,name,true,0xA0,3,FileCreate,out status);
+   if(directory==null&&NameCollision(status))directory=NativeOpen(parent,name,true,0xA0,3,FileOpen,out status);
+   if(directory==null)throw NativeFailure(status,"Cannot create or reopen the local directory: "+name);
+   return directory;
   }
   /// <summary>Checks one child's metadata, then pins the same file for reading without following reparses. Returns null when absent; the caller retains the parent lease.</summary>
   internal static SafeFileHandle OpenChildFile(SafeFileHandle directory,string name) {
@@ -182,12 +193,9 @@ namespace DragonCodexBoot {
       node=OpenChildFile(handles[index-1],parts[index-1]);
       if(node==null)return new LocalMediaFile(path,false,handles,null,false);
      } else {
-      int status;
-      node=NativeOpen(index==0?null:handles[index-1],index==0?target.ToString()+"\\":parts[index-1],true,0xA0,3,create&&index>0?FileOpenIf:FileOpen,out status);
-      if(node==null) {
-       if(!Missing(status))throw NativeFailure(status,"Cannot inspect the local path: "+path);
-       return new LocalMediaFile(path,false,handles,null,false);
-      }
+      if(index==0) { int status;node=NativeOpen(null,target.ToString()+"\\",true,0xA0,3,FileOpen,out status); }
+      else node=OpenChildDirectory(handles[index-1],parts[index-1],create);
+      if(node==null)return new LocalMediaFile(path,false,handles,null,false);
      }
      handles.Add(node);
      if(leaf) {

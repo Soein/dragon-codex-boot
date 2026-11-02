@@ -201,7 +201,17 @@ internal static class WindowsSecurityTests {
   using(LocalMediaFile file=LocalMediaPath.OpenFile(mediaRoot,local))Check(file.Exists,"A normal local absolute video must open.");
   LocalMediaPath.EnsureDirectory(mediaRoot,"created/deep");
   LocalMediaPath.WriteAllText(mediaRoot,"created/deep/local.txt","local native create");
+  LocalMediaPath.EnsureDirectory(mediaRoot,"created/deep");
   Check(LocalMediaPath.ReadAllText(mediaRoot,"created/deep/local.txt")=="local native create","Handle-relative directory creation and atomic local writes must remain supported.");
+  using(ManualResetEvent start=new ManualResetEvent(false)) {
+   Exception[] failures=new Exception[2];Thread[] creators=new Thread[2];
+   for(int index=0;index<creators.Length;index++) {
+    int worker=index;creators[index]=new Thread(delegate() { start.WaitOne();try { LocalMediaPath.EnsureDirectory(mediaRoot,"created-race/deep"); } catch(Exception error) { failures[worker]=error; } });creators[index].Start();
+   }
+   start.Set();foreach(Thread creator in creators)creator.Join();
+   Check(failures[0]==null&&failures[1]==null,"Concurrent local directory creation must safely create or reopen the same directory: "+failures[0]+" "+failures[1]);
+  }
+  using(LocalMediaFile raced=LocalMediaPath.OpenDirectory(mediaRoot,"created-race/deep"))Check(raced.Exists,"Concurrent native directory creation must leave a usable local directory.");
   using(LocalMediaFile folder=LocalMediaPath.OpenDirectory(fixture,mediaRoot)) {
    using(SafeFileHandle child=LocalMediaPath.OpenChildFile(folder.Handle,Path.GetFileName(local)))Check(child!=null&&!child.IsInvalid,"A normal child file must open through its held parent handle.");
    RejectMedia(delegate { using(SafeFileHandle child=LocalMediaPath.OpenChildFile(folder.Handle,@"..\outside.mp4")) {} },"A relative handle open must accept one leaf, never an ancestor path.");
