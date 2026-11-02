@@ -13,14 +13,19 @@ namespace DragonCodexBoot {
   private readonly List<SafeFileHandle> handles;
   private readonly SafeFileHandle file;
   private readonly bool createdForWrite;
+  private readonly int originalHandleCount;
   internal readonly string Path;
   internal readonly bool Exists;
   internal SafeFileHandle Handle { get { return file; } }
   internal LocalMediaFile(string path,bool exists,List<SafeFileHandle> owned,SafeFileHandle leaf,bool created) {
-   Path=path;Exists=exists;handles=owned;file=leaf;createdForWrite=created;
+   Path=path;Exists=exists;handles=owned;file=leaf;createdForWrite=created;originalHandleCount=owned.Count;
+  }
+  private void CheckLease() {
+   if(!Exists||file==null)throw new FileNotFoundException("Local file missing.",Path);
+   for(int index=0;index<originalHandleCount;index++)LocalMediaPath.CheckHandle(handles[index],index<originalHandleCount-1);
   }
   internal FileStream Stream(bool write) {
-   if(!Exists||file==null)throw new FileNotFoundException("Local file missing.",Path);
+   CheckLease();
    if(write&&!createdForWrite)throw new InvalidOperationException("Writes require a new private temporary file.");
    SafeFileHandle data=file;
    if(!createdForWrite) {
@@ -34,12 +39,13 @@ namespace DragonCodexBoot {
    FileStream stream=new FileStream(data,write?FileAccess.ReadWrite:FileAccess.Read);
    return stream;
   }
-  internal Uri MediaUri { get { return LocalMediaPath.FileUri(Path); } }
+  internal Uri MediaUri { get { CheckLease();return LocalMediaPath.FileUri(Path); } }
   public void Dispose() { for(int index=handles.Count-1;index>=0;index--)handles[index].Dispose();handles.Clear(); }
  }
  internal static class LocalMediaPath {
-  internal const uint NoFollowNoRecall=0x00200000|0x00100000;
-  private const uint MetadataFlags=NoFollowNoRecall|0x02000000;
+  // Native NT options differ from the similarly named Win32 CreateFile flags.
+  private const uint NativeNoFollowNoRecall=0x00200000|0x00400000;
+  private const uint FileOpen=1,FileCreate=2,FileOpenIf=3;
   [StructLayout(LayoutKind.Sequential)] private struct FileInformation {
    internal uint Attributes,CreatedLow,CreatedHigh,AccessedLow,AccessedHigh,WrittenLow,WrittenHigh;
    internal uint Volume,SizeHigh,SizeLow,Links,IndexHigh,IndexLow;
@@ -54,15 +60,24 @@ namespace DragonCodexBoot {
    internal IntPtr Status;
    internal UIntPtr Information;
   }
+  [StructLayout(LayoutKind.Sequential)] private struct UnicodeString {
+   internal ushort Length,MaximumLength;
+   internal IntPtr Buffer;
+  }
+  [StructLayout(LayoutKind.Sequential)] private struct ObjectAttributes {
+   internal uint Length;
+   internal IntPtr Directory,Name;
+   internal uint Attributes;
+   internal IntPtr Security,QualityOfService;
+  }
   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] private static extern uint QueryDosDevice(string name,StringBuilder target,uint length);
-  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] private static extern SafeFileHandle CreateFile(string path,uint access,uint share,IntPtr security,uint creation,uint flags,IntPtr template);
   [DllImport("kernel32.dll",SetLastError=true)] internal static extern SafeFileHandle ReOpenFile(SafeFileHandle original,uint access,uint share,uint flags);
   [DllImport("kernel32.dll",SetLastError=true)] private static extern bool GetFileInformationByHandle(SafeFileHandle file,out FileInformation information);
   [DllImport("kernel32.dll",SetLastError=true)] private static extern uint GetFileType(SafeFileHandle file);
-  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] private static extern bool CreateDirectory(string path,IntPtr security);
   [DllImport("kernel32.dll",SetLastError=true)] private static extern bool SetFileInformationByHandle(SafeFileHandle file,int kind,IntPtr information,uint size);
   [DllImport("ntdll.dll")] private static extern int NtSetInformationFile(SafeFileHandle file,out IoStatusBlock status,IntPtr information,uint size,int kind);
   [DllImport("ntdll.dll")] private static extern uint RtlNtStatusToDosError(int status);
+  [DllImport("ntdll.dll")] private static extern int NtCreateFile(out SafeFileHandle file,uint access,ref ObjectAttributes attributes,out IoStatusBlock io,IntPtr allocation,uint fileAttributes,uint share,uint creation,uint options,IntPtr extendedAttributes,uint extendedLength);
   private static ArgumentException UnsafePath() { return new ArgumentException("Only local disk paths without network, device, stream or reparse aliases are supported."); }
   internal static void ValidateReference(string reference) { ResolveReference(@"C:\",reference); }
   internal static string ResolveReference(string root,string reference) {
@@ -98,10 +113,53 @@ namespace DragonCodexBoot {
    if(!GetFileInformationByHandle(file,out information))throw NativeErrors.Create(Marshal.GetLastWin32Error(),"Cannot inspect the verified file handle.");
    if(GetFileType(file)!=1||!SafeAttributes(information.Attributes)||((information.Attributes&0x10)!=0)!=directory)throw UnsafePath();
   }
-  // QueryDosDevice only inspects the local DOS-device namespace. Inspect each component with
-  // OPEN_REPARSE_POINT/OPEN_NO_RECALL before accessing any descendant or opening media data.
-  // https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-querydosdevicew
-  // https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-createfilew
+  private static void ValidateLeaf(string name) {
+   if(String.IsNullOrEmpty(name)||name.IndexOfAny(new char[] {'\\','/',':'})>=0||ResolveReference(@"C:\",name)!=@"C:\"+name)throw UnsafePath();
+  }
+  private static Exception NativeFailure(int status,string operation) {
+   if(unchecked((uint)status)==0xC000050B)return UnsafePath(); // STATUS_REPARSE_POINT_ENCOUNTERED
+   return NativeErrors.Create(unchecked((int)RtlNtStatusToDosError(status)),operation+" [NTSTATUS=0x"+unchecked((uint)status).ToString("X8")+"].");
+  }
+  private static bool Missing(int status) { return status==unchecked((int)0xC0000034)||status==unchecked((int)0xC000003A); }
+  // Only the classified physical device root is absolute. Every child open/create is relative
+  // to its held parent, so a directory changed into a junction cannot redirect the next open.
+  // https://learn.microsoft.com/windows/win32/api/winternl/nf-winternl-ntcreatefile
+  // https://learn.microsoft.com/windows/win32/api/ntdef/ns-ntdef-_object_attributes
+  private static SafeFileHandle NativeOpen(SafeFileHandle parent,string name,bool directory,uint access,uint share,uint creation,out int status) {
+   if(parent!=null) { ValidateLeaf(name);CheckHandle(parent,true); }
+   else if(!name.EndsWith("\\",StringComparison.Ordinal)||!IsLocalDevice(name.Substring(0,name.Length-1)))throw UnsafePath();
+   if(name.Length>32766)throw UnsafePath();
+   IntPtr text=Marshal.StringToHGlobalUni(name),unicode=IntPtr.Zero;
+   bool parentReference=false;
+   try {
+    UnicodeString value=new UnicodeString {Length=(ushort)(name.Length*2),MaximumLength=(ushort)(name.Length*2+2),Buffer=text};
+    unicode=Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeString)));Marshal.StructureToPtr(value,unicode,false);
+    if(parent!=null)parent.DangerousAddRef(ref parentReference);
+    ObjectAttributes attributes=new ObjectAttributes {Length=(uint)Marshal.SizeOf(typeof(ObjectAttributes)),Directory=parent==null?IntPtr.Zero:parent.DangerousGetHandle(),Name=unicode,Attributes=0x1040}; // OBJ_DONT_REPARSE | OBJ_CASE_INSENSITIVE
+    IoStatusBlock io;SafeFileHandle file;
+    uint options=NativeNoFollowNoRecall|0x20u|(directory?1u:0x40u); // synchronous, directory/non-directory
+    status=NtCreateFile(out file,access|0x00100000,ref attributes,out io,IntPtr.Zero,directory?0x10u:0x80u,share,creation,options,IntPtr.Zero,0);
+    if(status<0) { if(file!=null)file.Dispose();return null; }
+    try { CheckHandle(file,directory);if(parent!=null)CheckHandle(parent,true);return file; }
+    catch { file.Dispose();throw; }
+   } finally { if(parentReference)parent.DangerousRelease();if(unicode!=IntPtr.Zero)Marshal.FreeHGlobal(unicode);Marshal.FreeHGlobal(text); }
+  }
+  /// <summary>Checks one child's metadata, then pins the same file for reading without following reparses. Returns null when absent; the caller retains the parent lease.</summary>
+  internal static SafeFileHandle OpenChildFile(SafeFileHandle directory,string name) {
+   if(directory==null)throw UnsafePath();
+   int status;
+   using(SafeFileHandle metadata=NativeOpen(directory,name,false,0x80,1,FileOpen,out status)) {
+    if(metadata==null) { if(Missing(status))return null;throw NativeFailure(status,"Cannot inspect the local child file"); }
+    SafeFileHandle file=NativeOpen(directory,name,false,0x81,1,FileOpen,out status); // FILE_READ_DATA | FILE_READ_ATTRIBUTES establishes a real sharing lease.
+    if(file==null)throw NativeFailure(status,"Cannot pin the verified local child file");
+    try {
+     FileInformation before,after;
+     if(!GetFileInformationByHandle(metadata,out before)||!GetFileInformationByHandle(file,out after))throw NativeErrors.Create(Marshal.GetLastWin32Error(),"Cannot compare the verified local file identity.");
+     if(before.Volume!=after.Volume||before.IndexHigh!=after.IndexHigh||before.IndexLow!=after.IndexLow)throw new IOException("The local child file changed while acquiring its read lease.");
+     return file;
+    } catch { file.Dispose();throw; }
+   }
+  }
   private static LocalMediaFile Walk(string root,string reference,bool directory,bool create) {
    string path=ResolveReference(root,reference);
    StringBuilder target=new StringBuilder(32768);
@@ -110,22 +168,26 @@ namespace DragonCodexBoot {
    List<SafeFileHandle> handles=new List<SafeFileHandle>();
    try {
     string[] parts=path.Substring(3).Split(new char[] {'\\'},StringSplitOptions.RemoveEmptyEntries);
-    string current=path.Substring(0,3);
+    if(parts.Length==0&&!directory)throw UnsafePath();
     for(int index=0;index<=parts.Length;index++) {
-     if(index>0)current=current.TrimEnd('\\')+"\\"+parts[index-1];
-     bool leaf=index==parts.Length,asDirectory=!leaf||directory;
-     SafeFileHandle node=CreateFile(current,asDirectory?0xA0u:0x80u,1,IntPtr.Zero,3,MetadataFlags,IntPtr.Zero);
-     if(node.IsInvalid) {
-      int error=Marshal.GetLastWin32Error();node.Dispose();
-      if(error!=2&&error!=3)throw NativeErrors.Create(error,"Cannot inspect the local path: "+current);
-      if(create&&asDirectory) {
-       if(!CreateDirectory(current,IntPtr.Zero))throw NativeErrors.Create(Marshal.GetLastWin32Error(),"Cannot create the local directory.");
-       node=CreateFile(current,0xA0,1,IntPtr.Zero,3,MetadataFlags,IntPtr.Zero);
-      } else return new LocalMediaFile(path,false,handles,null,false);
-      if(node.IsInvalid) { error=Marshal.GetLastWin32Error();node.Dispose();throw NativeErrors.Create(error,"Cannot open the new local directory."); }
+     bool leaf=index==parts.Length;
+     SafeFileHandle node;
+     if(leaf&&!directory) {
+      node=OpenChildFile(handles[index-1],parts[index-1]);
+      if(node==null)return new LocalMediaFile(path,false,handles,null,false);
+     } else {
+      int status;
+      node=NativeOpen(index==0?null:handles[index-1],index==0?target.ToString()+"\\":parts[index-1],true,0xA0,3,create&&index>0?FileOpenIf:FileOpen,out status);
+      if(node==null) {
+       if(!Missing(status))throw NativeFailure(status,"Cannot inspect the local path: "+path);
+       return new LocalMediaFile(path,false,handles,null,false);
+      }
      }
-     handles.Add(node);CheckHandle(node,asDirectory);
-     if(leaf)return new LocalMediaFile(path,true,handles,node,false);
+     handles.Add(node);
+     if(leaf) {
+      for(int ancestor=0;ancestor<handles.Count;ancestor++)CheckHandle(handles[ancestor],ancestor<handles.Count-1||directory);
+      return new LocalMediaFile(path,true,handles,node,false);
+     }
     }
     throw UnsafePath();
    } catch { for(int index=handles.Count-1;index>=0;index--)handles[index].Dispose();throw; }
@@ -136,14 +198,9 @@ namespace DragonCodexBoot {
   internal static SafeFileHandle AcquireImportLock(LocalMediaFile root) {
    if(!root.Exists||root.Handle==null)throw new DirectoryNotFoundException("Local installation directory missing.");
    CheckHandle(root.Handle,true);
-   string path=ResolveReference(root.Path,".dragon-media-import.lock");
-   using(LocalMediaFile existing=OpenFile(root.Path,path)) {}
-   SafeFileHandle handle=CreateFile(path,0xC0000000,0,IntPtr.Zero,4,MetadataFlags,IntPtr.Zero);
-   if(handle.IsInvalid) {
-    int error=Marshal.GetLastWin32Error();handle.Dispose();
-    throw NativeErrors.Create(error,"Another media import is active or the local import lock is unavailable.");
-   }
-   try { CheckHandle(handle,false);return handle; } catch { handle.Dispose();throw; }
+   int status;SafeFileHandle handle=NativeOpen(root.Handle,".dragon-media-import.lock",false,0xC0000000,0,FileOpenIf,out status);
+   if(handle==null)throw NativeFailure(status,"Another media import is active or the local import lock is unavailable");
+   return handle;
   }
   internal static Uri FileUri(string path) {
    string full=ResolveReference(null,path);
@@ -173,7 +230,7 @@ namespace DragonCodexBoot {
    });
   }
   private static void Rename(SafeFileHandle file,SafeFileHandle directory,string name) {
-   if(String.IsNullOrEmpty(name)||name.IndexOfAny(new char[] {'\\','/',':'})>=0||ResolveReference(@"C:\",name)!=@"C:\"+name)throw UnsafePath();
+   ValidateLeaf(name);
    CheckHandle(file,false);CheckHandle(directory,true);
    byte[] text=Encoding.Unicode.GetBytes(name);
    int offset=(int)Marshal.OffsetOf(typeof(RenameInformation),"FirstCharacter");
@@ -200,13 +257,14 @@ namespace DragonCodexBoot {
    int split=path.LastIndexOf('\\');string parent=path.Substring(0,split+1);
    using(LocalMediaFile folder=OpenDirectory(root,parent)) {
     if(!folder.Exists)throw new DirectoryNotFoundException("Local destination directory missing.");
-    using(LocalMediaFile destination=OpenFile(root,path)) {}
-    string temporary=ResolveReference(parent,".dragon-media-"+Guid.NewGuid().ToString("N")+".tmp");
-    SafeFileHandle handle=CreateFile(temporary,0xC0010000,1,IntPtr.Zero,1,MetadataFlags,IntPtr.Zero);
-    if(handle.IsInvalid) { int error=Marshal.GetLastWin32Error();handle.Dispose();throw NativeErrors.Create(error,"Cannot create the local temporary file."); }
+    string name=path.Substring(split+1);
+    using(SafeFileHandle destination=OpenChildFile(folder.Handle,name)) {}
+    string temporaryName=".dragon-media-"+Guid.NewGuid().ToString("N")+".tmp",temporary=ResolveReference(parent,temporaryName);
+    int status;SafeFileHandle handle=NativeOpen(folder.Handle,temporaryName,false,0xC0010000,1,FileCreate,out status);
+    if(handle==null)throw NativeFailure(status,"Cannot create the local temporary file");
     using(LocalMediaFile file=new LocalMediaFile(temporary,true,new List<SafeFileHandle> {handle},handle,true)) {
      bool committed=false;FileStream stream=null;
-     try { stream=file.Stream(true);write(stream);stream.Flush(true);Rename(handle,folder.Handle,path.Substring(split+1));committed=true; }
+     try { stream=file.Stream(true);write(stream);stream.Flush(true);Rename(handle,folder.Handle,name);committed=true; }
      finally {
       if(!committed) {
        IntPtr disposition=Marshal.AllocHGlobal(1);

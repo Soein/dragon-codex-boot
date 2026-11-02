@@ -6,6 +6,7 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 using DragonCodexBoot;
+using Microsoft.Win32.SafeHandles;
 
 internal static class WindowsSecurityTests {
  private static int checks;
@@ -16,6 +17,23 @@ internal static class WindowsSecurityTests {
  }
  [DllImport("shell32.dll",CharSet=CharSet.Unicode)] private static extern int SetCurrentProcessExplicitAppUserModelID(string value);
  [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr window,uint message,IntPtr w,IntPtr l);
+ [DllImport("kernel32.dll",EntryPoint="CreateFileW",CharSet=CharSet.Unicode,ExactSpelling=true,SetLastError=true)] private static extern SafeFileHandle OpenFixtureDirectory(string path,uint access,uint share,IntPtr security,uint creation,uint flags,IntPtr template);
+ [DllImport("kernel32.dll",SetLastError=true)] private static extern bool DeviceIoControl(SafeFileHandle file,uint code,byte[] input,uint size,IntPtr output,uint outputSize,out uint returned,IntPtr overlapped);
+ private static int SetLocalJunction(string directory,string target) {
+  string substitute=@"\??\"+target;
+  byte[] paths=System.Text.Encoding.Unicode.GetBytes(substitute+"\0"+target+"\0");
+  byte[] buffer=new byte[16+paths.Length];
+  Array.Copy(BitConverter.GetBytes(0xA0000003u),0,buffer,0,4);
+  Array.Copy(BitConverter.GetBytes((ushort)(8+paths.Length)),0,buffer,4,2);
+  Array.Copy(BitConverter.GetBytes((ushort)(substitute.Length*2)),0,buffer,10,2);
+  Array.Copy(BitConverter.GetBytes((ushort)((substitute.Length+1)*2)),0,buffer,12,2);
+  Array.Copy(BitConverter.GetBytes((ushort)(target.Length*2)),0,buffer,14,2);
+  Array.Copy(paths,0,buffer,16,paths.Length);
+  using(SafeFileHandle handle=OpenFixtureDirectory(directory,0x40000000,3,IntPtr.Zero,3,0x02200000,IntPtr.Zero)) {
+   if(handle.IsInvalid)return Marshal.GetLastWin32Error();
+   uint returned;return DeviceIoControl(handle,0x000900A4,buffer,(uint)buffer.Length,IntPtr.Zero,0,out returned,IntPtr.Zero)?0:Marshal.GetLastWin32Error();
+  }
+ }
  private static void Wait(Func<bool> condition,string message) {
   Stopwatch clock=Stopwatch.StartNew();
   while(!condition()) { if(clock.Elapsed.TotalSeconds>20)throw new Exception(message);Thread.Sleep(30); }
@@ -162,6 +180,7 @@ internal static class WindowsSecurityTests {
   Check(LocalMediaPath.IsLocalDevice(@"\Device\HarddiskVolume123")&&LocalMediaPath.IsLocalDevice(@"\Device\CdRom0"),"Physical local media devices remain supported.");
   foreach(uint attributes in new uint[] {0x400,0x1000,0x40000,0x400000})Check(!LocalMediaPath.SafeAttributes(attributes),"Reparse, offline and recall attributes must be rejected before media data access.");
   string mediaRoot=Path.Combine(fixture,"media-paths");Directory.CreateDirectory(mediaRoot);
+  string junctionTarget=Path.Combine(fixture,"junction-local-target");Directory.CreateDirectory(junctionTarget);
   string local=Path.Combine(mediaRoot,"literal %2e%2e #\u4f60\u597d.mp4");File.WriteAllBytes(local,new byte[] {1,2,3,4});
   using(LocalMediaFile file=LocalMediaPath.OpenFile(mediaRoot,Path.GetFileName(local))) {
    Check(file.Exists&&String.Equals(file.Path,local,StringComparison.OrdinalIgnoreCase),"A normal local relative video must open.");
@@ -169,10 +188,32 @@ internal static class WindowsSecurityTests {
    using(FileStream stream=file.Stream(false))Check(stream.ReadByte()==1,"Read media through the verified file handle.");
    bool locked=false;try { Directory.Move(mediaRoot,mediaRoot+"-moved"); } catch(IOException) { locked=true; }
    Check(locked,"Verified parent directories must remain protected from path replacement while media is in use.");
+   locked=false;try { File.Move(local,local+"-moved"); } catch(IOException) { locked=true; }
+   Check(locked,"A verified media file needs a real read sharing lease that prevents replacing its path during playback.");
+   locked=false;try { File.Delete(local); } catch(IOException) { locked=true; }
+   Check(locked,"A verified media file must not be deletable while its read sharing lease is held.");
+   Check(SetLocalJunction(mediaRoot,junctionTarget)!=0,"A held media ancestor with a pinned child must not be convertible into a junction.");
   }
   Directory.Move(mediaRoot,mediaRoot+"-moved");Directory.Move(mediaRoot+"-moved",mediaRoot);
   Check(true,"Disposing media validation must release its directory handles.");
+  File.Move(local,local+"-moved");File.Move(local+"-moved",local);Check(true,"Disposing media validation must release the leaf rename protection.");
+  File.Delete(local);Check(!File.Exists(local),"Disposing media validation must release the leaf deletion protection.");File.WriteAllBytes(local,new byte[] {1,2,3,4});
   using(LocalMediaFile file=LocalMediaPath.OpenFile(mediaRoot,local))Check(file.Exists,"A normal local absolute video must open.");
+  LocalMediaPath.EnsureDirectory(mediaRoot,"created/deep");
+  LocalMediaPath.WriteAllText(mediaRoot,"created/deep/local.txt","local native create");
+  Check(LocalMediaPath.ReadAllText(mediaRoot,"created/deep/local.txt")=="local native create","Handle-relative directory creation and atomic local writes must remain supported.");
+  using(LocalMediaFile folder=LocalMediaPath.OpenDirectory(fixture,mediaRoot)) {
+   using(SafeFileHandle child=LocalMediaPath.OpenChildFile(folder.Handle,Path.GetFileName(local)))Check(child!=null&&!child.IsInvalid,"A normal child file must open through its held parent handle.");
+   RejectMedia(delegate { using(SafeFileHandle child=LocalMediaPath.OpenChildFile(folder.Handle,@"..\outside.mp4")) {} },"A relative handle open must accept one leaf, never an ancestor path.");
+  }
+  string mutable=Path.Combine(fixture,"mutable-media-parent");Directory.CreateDirectory(mutable);
+  using(LocalMediaFile folder=LocalMediaPath.OpenDirectory(fixture,mutable)) {
+   int junction=SetLocalJunction(mutable,mediaRoot);
+   Check(junction==0,"The isolated empty-directory fixture must permit a junction change under the directory lease; Win32="+junction);
+   RejectMedia(delegate { using(SafeFileHandle child=LocalMediaPath.OpenChildFile(folder.Handle,Path.GetFileName(local))) {} },"An empty parent changed after validation must be rejected before a child is opened; the junction target is only local.");
+  }
+  RejectMedia(delegate { LocalMediaPath.EnsureDirectory(fixture,"mutable-media-parent/must-not-create"); },"A handle-relative directory create must reject a reparse ancestor.");
+  Check(!Directory.Exists(Path.Combine(mediaRoot,"must-not-create")),"A rejected directory create must not modify the local junction target.");
   using(LocalMediaFile file=LocalMediaPath.OpenFile(mediaRoot,"missing/video.mp4"))Check(!file.Exists,"Missing local media remains reportable without contacting a remote path.");
   Config config=new JavaScriptSerializer().Deserialize<Config>(File.ReadAllText(Path.Combine(repository,"config","launcher.example.json")));
   foreach(string reference in remoteReferences) {
