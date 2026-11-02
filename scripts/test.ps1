@@ -15,7 +15,8 @@ if ($process.ExitCode -ne 0) {
         $policy=$assembly.GetType('DragonCodexBoot.LocalMediaPath',$true)
         $staticFlags=[Reflection.BindingFlags]'Static,NonPublic'
         $instanceFlags=[Reflection.BindingFlags]'Instance,NonPublic'
-        $mediaGuard=$policy.GetMethod('OpenFile',$staticFlags).Invoke($null,@($outputRoot,'launcher.json'))
+        [object[]]$guardArguments=@(([string]$outputRoot),([string]'launcher.json'))
+        $mediaGuard=$policy.GetMethod('OpenFile',$staticFlags).Invoke($null,$guardArguments)
         $probePath=$mediaGuard.GetType().GetField('Path',$instanceFlags).GetValue($mediaGuard)
         Add-Type -TypeDefinition @'
 using System;
@@ -27,23 +28,25 @@ public static class LocalReOpenProbe {
  private static extern SafeFileHandle CreateFile(string path,uint access,uint share,IntPtr security,uint creation,uint flags,IntPtr template);
  [DllImport("kernel32.dll",SetLastError=true)]
  private static extern SafeFileHandle ReOpenFile(SafeFileHandle file,uint access,uint share,uint flags);
- public static string Run(string path,uint originalAccess,uint flags) {
-  using(SafeFileHandle original=CreateFile(path,originalAccess,1,IntPtr.Zero,3,0x02300000,IntPtr.Zero)) {
+ public static string Run(string path,uint originalAccess,uint originalFlags,uint flags) {
+  using(SafeFileHandle original=CreateFile(path,originalAccess,1,IntPtr.Zero,3,originalFlags,IntPtr.Zero)) {
    if(original.IsInvalid) {
     int error=Marshal.GetLastWin32Error();
-    return String.Format("REOPEN PROBE originalAccess=0x{0:X}: CreateFile Win32 {1}: {2}",originalAccess,error,new Win32Exception(error).Message);
+    return String.Format("REOPEN PROBE originalAccess=0x{0:X}, originalFlags=0x{1:X}: CreateFile Win32 {2}: {3}",originalAccess,originalFlags,error,new Win32Exception(error).Message);
    }
    using(SafeFileHandle reopened=ReOpenFile(original,0x80000000,1,flags)) {
     int error=reopened.IsInvalid?Marshal.GetLastWin32Error():0;
-    return String.Format("REOPEN PROBE originalAccess=0x{0:X}, flags=0x{1:X}: Win32 {2}: {3}",originalAccess,flags,error,new Win32Exception(error).Message);
+    return String.Format("REOPEN PROBE originalAccess=0x{0:X}, originalFlags=0x{1:X}, flags=0x{2:X}: Win32 {3}: {4}",originalAccess,originalFlags,flags,error,new Win32Exception(error).Message);
    }
   }
  }
 }
 '@
         foreach ($originalAccess in @([uint32]128,[uint32]2147483648)) {
-            foreach ($flags in @([uint32]0,[uint32]0x00200000,[uint32]0x00100000,[uint32]0x00300000)) {
-                [LocalReOpenProbe]::Run($probePath,$originalAccess,$flags)
+            foreach ($originalFlags in @([uint32]0x02000000,[uint32]0x02300000)) {
+                foreach ($flags in @([uint32]0,[uint32]0x00200000,[uint32]0x00100000,[uint32]0x00300000)) {
+                    [LocalReOpenProbe]::Run($probePath,$originalAccess,$originalFlags,$flags)
+                }
             }
         }
     } catch { Write-Output ('Local ReOpen diagnostic failed: '+$_.Exception.ToString()) }
