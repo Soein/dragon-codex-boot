@@ -50,6 +50,10 @@ namespace DragonCodexBoot {
    internal uint NameLength;
    internal char FirstCharacter;
   }
+  [StructLayout(LayoutKind.Sequential)] private struct IoStatusBlock {
+   internal IntPtr Status;
+   internal UIntPtr Information;
+  }
   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] private static extern uint QueryDosDevice(string name,StringBuilder target,uint length);
   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] private static extern SafeFileHandle CreateFile(string path,uint access,uint share,IntPtr security,uint creation,uint flags,IntPtr template);
   [DllImport("kernel32.dll",SetLastError=true)] internal static extern SafeFileHandle ReOpenFile(SafeFileHandle original,uint access,uint share,uint flags);
@@ -57,6 +61,8 @@ namespace DragonCodexBoot {
   [DllImport("kernel32.dll",SetLastError=true)] private static extern uint GetFileType(SafeFileHandle file);
   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] private static extern bool CreateDirectory(string path,IntPtr security);
   [DllImport("kernel32.dll",SetLastError=true)] private static extern bool SetFileInformationByHandle(SafeFileHandle file,int kind,IntPtr information,uint size);
+  [DllImport("ntdll.dll")] private static extern int NtSetInformationFile(SafeFileHandle file,out IoStatusBlock status,IntPtr information,uint size,int kind);
+  [DllImport("ntdll.dll")] private static extern uint RtlNtStatusToDosError(int status);
   private static ArgumentException UnsafePath() { return new ArgumentException("Only local disk paths without network, device, stream or reparse aliases are supported."); }
   internal static void ValidateReference(string reference) { ResolveReference(@"C:\",reference); }
   internal static string ResolveReference(string root,string reference) {
@@ -166,19 +172,28 @@ namespace DragonCodexBoot {
     }
    });
   }
-  private static void Rename(SafeFileHandle file,string destination) {
-   byte[] text=Encoding.Unicode.GetBytes(ResolveReference(null,destination));
+  private static void Rename(SafeFileHandle file,SafeFileHandle directory,string name) {
+   if(String.IsNullOrEmpty(name)||name.IndexOfAny(new char[] {'\\','/',':'})>=0||ResolveReference(@"C:\",name)!=@"C:\"+name)throw UnsafePath();
+   CheckHandle(file,false);CheckHandle(directory,true);
+   byte[] text=Encoding.Unicode.GetBytes(name);
    int offset=(int)Marshal.OffsetOf(typeof(RenameInformation),"FirstCharacter");
    int size=Marshal.SizeOf(typeof(RenameInformation))+text.Length+sizeof(char);
    IntPtr buffer=Marshal.AllocHGlobal(size);
+   bool directoryReference=false;
    try {
+    directory.DangerousAddRef(ref directoryReference);
     for(int index=0;index<size;index++)Marshal.WriteByte(buffer,index,0);
     Marshal.WriteInt32(buffer,1);
-    Marshal.WriteIntPtr(buffer,(int)Marshal.OffsetOf(typeof(RenameInformation),"Directory"),IntPtr.Zero);
+    Marshal.WriteIntPtr(buffer,(int)Marshal.OffsetOf(typeof(RenameInformation),"Directory"),directory.DangerousGetHandle());
     Marshal.WriteInt32(buffer,(int)Marshal.OffsetOf(typeof(RenameInformation),"NameLength"),text.Length);
     Marshal.Copy(text,0,IntPtr.Add(buffer,offset),text.Length);
-    if(!SetFileInformationByHandle(file,3,buffer,(uint)size))throw NativeErrors.Create(Marshal.GetLastWin32Error(),"Atomic local file replacement failed (RootDirectory=NULL, nameBytes="+text.Length+", bufferSize="+size+").");
-   } finally { Marshal.FreeHGlobal(buffer); }
+    // Native FileRenameInformation accepts a checked directory handle and one leaf name.
+    // The temporary handle was opened synchronously, so this call completes before the buffer is freed.
+    // https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information
+    IoStatusBlock io;
+    int status=NtSetInformationFile(file,out io,buffer,(uint)size,10);
+    if(status<0)throw NativeErrors.Create(unchecked((int)RtlNtStatusToDosError(status)),"Atomic local file replacement failed (NtSetInformationFile, NTSTATUS=0x"+unchecked((uint)status).ToString("X8")+", nameBytes="+text.Length+", bufferSize="+size+").");
+   } finally { Marshal.FreeHGlobal(buffer);if(directoryReference)directory.DangerousRelease(); }
   }
   private static void AtomicWrite(string root,string reference,Action<FileStream> write) {
    string path=ResolveReference(root,reference);
@@ -191,7 +206,7 @@ namespace DragonCodexBoot {
     if(handle.IsInvalid) { int error=Marshal.GetLastWin32Error();handle.Dispose();throw NativeErrors.Create(error,"Cannot create the local temporary file."); }
     using(LocalMediaFile file=new LocalMediaFile(temporary,true,new List<SafeFileHandle> {handle},handle,true)) {
      bool committed=false;FileStream stream=null;
-     try { stream=file.Stream(true);write(stream);stream.Flush(true);Rename(handle,path);committed=true; }
+     try { stream=file.Stream(true);write(stream);stream.Flush(true);Rename(handle,folder.Handle,path.Substring(split+1));committed=true; }
      finally {
       if(!committed) {
        IntPtr disposition=Marshal.AllocHGlobal(1);
