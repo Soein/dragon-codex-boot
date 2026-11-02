@@ -25,7 +25,7 @@ namespace DragonCodexBoot {
    SafeFileHandle data=file;
    if(!createdForWrite) {
     data=LocalMediaPath.ReOpenFile(file,write?0xC0000000:0x80000000,1,LocalMediaPath.NoFollowNoRecall);
-    if(data.IsInvalid) { int error=Marshal.GetLastWin32Error();data.Dispose();throw new Win32Exception(error,"Cannot open the verified local file."); }
+    if(data.IsInvalid) { int error=Marshal.GetLastWin32Error();data.Dispose();throw NativeErrors.Create(error,"ReOpenFile(access=GENERIC_READ, share=READ, flags=0x00300000) cannot open the verified local file."); }
     handles.Add(data);
    }
    LocalMediaPath.CheckHandle(data,false);
@@ -87,7 +87,7 @@ namespace DragonCodexBoot {
   }
   internal static void CheckHandle(SafeFileHandle file,bool directory) {
    FileInformation information;
-   if(!GetFileInformationByHandle(file,out information))throw new Win32Exception(Marshal.GetLastWin32Error());
+   if(!GetFileInformationByHandle(file,out information))throw NativeErrors.Create(Marshal.GetLastWin32Error(),"Cannot inspect the verified file handle.");
    if(GetFileType(file)!=1||!SafeAttributes(information.Attributes)||((information.Attributes&0x10)!=0)!=directory)throw UnsafePath();
   }
   // QueryDosDevice only inspects the local DOS-device namespace. Inspect each component with
@@ -97,7 +97,7 @@ namespace DragonCodexBoot {
   private static LocalMediaFile Walk(string root,string reference,bool directory,bool create) {
    string path=ResolveReference(root,reference);
    StringBuilder target=new StringBuilder(32768);
-   if(QueryDosDevice(path.Substring(0,2),target,(uint)target.Capacity)==0)throw new Win32Exception(Marshal.GetLastWin32Error(),"Cannot verify that the drive is local.");
+   if(QueryDosDevice(path.Substring(0,2),target,(uint)target.Capacity)==0)throw NativeErrors.Create(Marshal.GetLastWin32Error(),"Cannot verify that the drive is local.");
    if(!IsLocalDevice(target.ToString()))throw UnsafePath();
    List<SafeFileHandle> handles=new List<SafeFileHandle>();
    try {
@@ -109,12 +109,12 @@ namespace DragonCodexBoot {
      SafeFileHandle node=CreateFile(current,asDirectory?0xA0u:0x80u,1,IntPtr.Zero,3,MetadataFlags,IntPtr.Zero);
      if(node.IsInvalid) {
       int error=Marshal.GetLastWin32Error();node.Dispose();
-      if(error!=2&&error!=3)throw new Win32Exception(error,"Cannot inspect the local path: "+current);
+      if(error!=2&&error!=3)throw NativeErrors.Create(error,"Cannot inspect the local path: "+current);
       if(create&&asDirectory) {
-       if(!CreateDirectory(current,IntPtr.Zero))throw new Win32Exception(Marshal.GetLastWin32Error());
+       if(!CreateDirectory(current,IntPtr.Zero))throw NativeErrors.Create(Marshal.GetLastWin32Error(),"Cannot create the local directory.");
        node=CreateFile(current,0xA0,1,IntPtr.Zero,3,MetadataFlags,IntPtr.Zero);
       } else return new LocalMediaFile(path,false,handles,null,false);
-      if(node.IsInvalid) { error=Marshal.GetLastWin32Error();node.Dispose();throw new Win32Exception(error); }
+      if(node.IsInvalid) { error=Marshal.GetLastWin32Error();node.Dispose();throw NativeErrors.Create(error,"Cannot open the new local directory."); }
      }
      handles.Add(node);CheckHandle(node,asDirectory);
      if(leaf)return new LocalMediaFile(path,true,handles,node,false);
@@ -163,7 +163,7 @@ namespace DragonCodexBoot {
     Marshal.WriteIntPtr(buffer,(int)Marshal.OffsetOf(typeof(RenameInformation),"Directory"),directory.DangerousGetHandle());
     Marshal.WriteInt32(buffer,(int)Marshal.OffsetOf(typeof(RenameInformation),"NameLength"),text.Length);
     Marshal.Copy(text,0,IntPtr.Add(buffer,offset),text.Length);
-    if(!SetFileInformationByHandle(file,3,buffer,(uint)size))throw new Win32Exception(Marshal.GetLastWin32Error(),"Atomic local file replacement failed.");
+    if(!SetFileInformationByHandle(file,3,buffer,(uint)size))throw NativeErrors.Create(Marshal.GetLastWin32Error(),"Atomic local file replacement failed.");
    } finally { if(retained)directory.DangerousRelease();Marshal.FreeHGlobal(buffer); }
   }
   private static void AtomicWrite(string root,string reference,Action<FileStream> write) {
@@ -174,7 +174,7 @@ namespace DragonCodexBoot {
     using(LocalMediaFile destination=OpenFile(root,path)) {}
     string temporary=ResolveReference(parent,".dragon-media-"+Guid.NewGuid().ToString("N")+".tmp");
     SafeFileHandle handle=CreateFile(temporary,0xC0010000,1,IntPtr.Zero,1,MetadataFlags,IntPtr.Zero);
-    if(handle.IsInvalid) { int error=Marshal.GetLastWin32Error();handle.Dispose();throw new Win32Exception(error); }
+    if(handle.IsInvalid) { int error=Marshal.GetLastWin32Error();handle.Dispose();throw NativeErrors.Create(error,"Cannot create the local temporary file."); }
     using(LocalMediaFile file=new LocalMediaFile(temporary,true,new List<SafeFileHandle> {handle},handle,true)) {
      bool committed=false;FileStream stream=null;
      try { stream=file.Stream(true);write(stream);stream.Flush(true);Rename(handle,folder.Handle,name);committed=true; }
